@@ -2,8 +2,9 @@
 
 __all__ = ['tensor', 'set_seed', 'TensorBase', 'concat', 'Chunks', 'apply', 'to_detach', 'to_half', 'to_float',
            'default_device', 'to_device', 'to_cpu', 'to_np', 'item_find', 'find_device', 'find_bs', 'Module', 'one_hot',
-           'one_hot_decode', 'trainable_params', 'bn_bias_params', 'make_cross_image', 'show_title', 'show_image',
-           'show_titled_image', 'show_image_batch', 'flatten_check']
+           'one_hot_decode', 'trainable_params', 'bn_types', 'bn_bias_params', 'make_cross_image', 'show_title',
+           'show_image', 'show_titled_image', 'show_image_batch', 'requires_grad', 'init_default', 'cond_init',
+           'apply_leaf', 'apply_init', 'flatten_check']
 
 #Cell
 from .test import *
@@ -237,11 +238,14 @@ def trainable_params(m):
     return [p for p in m.parameters() if p.requires_grad]
 
 #Cell
-def bn_bias_params(m):
+bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
+
+#Cell
+def bn_bias_params(m, with_bias=True):
     "Return all bias and BatchNorm parameters"
-    if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)): return list(m.parameters())
-    res = sum([bn_bias_params(c) for c in m.children()], [])
-    if hasattr(m, 'bias'): res.append(m.bias)
+    if isinstance(m, bn_types): return list(m.parameters())
+    res = sum([bn_bias_params(c, with_bias) for c in m.children()], [])
+    if with_bias and hasattr(m, 'bias'): res.append(m.bias)
     return res
 
 #Cell
@@ -297,6 +301,37 @@ def show_image_batch(b, show=show_titled_image, items=9, cols=3, figsize=None, *
     if figsize is None: figsize = (cols*3, rows*3)
     fig,axs = plt.subplots(rows, cols, figsize=figsize)
     for *o,ax in zip(*to_cpu(b), axs.flatten()): show(o, ax=ax, **kwargs)
+
+#Cell
+def requires_grad(m):
+    "Check if the first parameter of `m` requires grad or not"
+    ps = list(m.parameters())
+    return ps[0].requires_grad if len(ps)>0 else False
+
+#Cell
+def init_default(m, func=nn.init.kaiming_normal_):
+    "Initialize `m` weights with `func` and set `bias` to 0."
+    if func:
+        if hasattr(m, 'weight'): func(m.weight)
+        if hasattr(m, 'bias') and hasattr(m.bias, 'data'): m.bias.data.fill_(0.)
+    return m
+
+#Cell
+def cond_init(m, func):
+    "Apply `init_default` to `m` unless it's a batchnorm module"
+    if (not isinstance(m, bn_types)) and requires_grad(m): init_default(m, func)
+
+#Cell
+def apply_leaf(m, f):
+    "Apply `f` to children of `m`."
+    c = m.children()
+    if isinstance(m, nn.Module): f(m)
+    for l in c: apply_leaf(l,f)
+
+#Cell
+def apply_init(m, func=nn.init.kaiming_normal_):
+    "Initialize all non-batchnorm layers of `m` with `func`."
+    apply_leaf(m, partial(cond_init, func=func))
 
 #Comes from 20_metrics.ipynb, cell
 def flatten_check(inp, targ, detach=True):
