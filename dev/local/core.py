@@ -2,14 +2,14 @@
 
 __all__ = ['defaults', 'PrePostInitMeta', 'BaseObj', 'NewChkMeta', 'BypassNewMeta', 'patch_to', 'patch',
            'patch_property', 'use_kwargs', 'delegates', 'funcs_kwargs', 'method', 'chk', 'add_docs', 'docs',
-           'custom_dir', 'GetAttr', 'delegate_attr', 'coll_repr', 'mask2idxs', 'CollBase', 'cycle', 'zip_cycle', 'L',
-           'ifnone', 'get_class', 'mk_class', 'wrap_class', 'store_attr', 'tuplify', 'replicate', 'uniqueify', 'setify',
-           'is_listy', 'range_of', 'groupby', 'merge', 'shufflish', 'IterLen', 'ReindexCollection', 'lt', 'gt', 'le',
-           'ge', 'eq', 'ne', 'add', 'sub', 'mul', 'truediv', 'Inf', 'true', 'stop', 'gen', 'chunked', 'retain_type',
-           'retain_types', 'show_title', 'ShowTitle', 'Int', 'Float', 'Str', 'TupleBase', 'TupleTitled', 'trace',
-           'compose', 'maps', 'partialler', 'instantiate', '_0', '_1', '_2', '_3', '_4', 'bind', 'Self', 'Self',
-           'sort_by_run', 'display_df', 'round_multiple', 'num_cpus', 'add_props', 'all_union', 'all_disjoint',
-           'camel2snake', 'PrettyString', 'one_param']
+           'custom_dir', 'GetAttr', 'delegate_attr', 'coll_repr', 'mask2idxs', 'listable_types', 'CollBase', 'cycle',
+           'zip_cycle', 'L', 'ifnone', 'get_class', 'mk_class', 'wrap_class', 'store_attr', 'tuplify', 'replicate',
+           'uniqueify', 'setify', 'is_listy', 'range_of', 'groupby', 'merge', 'shufflish', 'IterLen',
+           'ReindexCollection', 'lt', 'gt', 'le', 'ge', 'eq', 'ne', 'add', 'sub', 'mul', 'truediv', 'Inf', 'true',
+           'stop', 'gen', 'chunked', 'retain_type', 'retain_types', 'show_title', 'ShowTitle', 'Int', 'Float', 'Str',
+           'TupleBase', 'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'instantiate', '_0', '_1', '_2', '_3',
+           '_4', 'bind', 'Self', 'Self', 'sort_by_run', 'display_df', 'round_multiple', 'num_cpus', 'add_props',
+           'all_union', 'all_disjoint', 'camel2snake', 'PrettyString']
 
 #Cell
 from .test import *
@@ -215,18 +215,21 @@ def mask2idxs(mask):
     return [int(i) for i in mask]
 
 #Cell
+listable_types = typing.Collection,Generator,map,filter,zip
+
+#Cell
+def _is_array(x): return hasattr(x,'__array__') or hasattr(x,'iloc')
+
 def _listify(o):
     if o is None: return []
     if isinstance(o, list): return o
-    if isinstance(o, str) or hasattr(o,'__array__'): return [o]
+    if isinstance(o, str) or _is_array(o): return [o]
     if is_iter(o): return list(o)
     return [o]
 
 #Cell
 class CollBase:
     "Base class for composing a list of `items`"
-    _xtra =  [o for o in dir([]) if not o.startswith('_')]
-
     def __init__(self, items): self.items = items
     def __len__(self): return len(self.items)
     def __getitem__(self, k): return self.items[k]
@@ -249,10 +252,11 @@ def zip_cycle(x, *args):
 #Cell
 class L(CollBase, GetAttr, metaclass=NewChkMeta):
     "Behaves like a list of `items` but can also index with list of indices or masks"
+    _xtra =  [o for o in dir([]) if not o.startswith('_')]
     def __init__(self, items=None, *rest, use_list=False, match=None):
         if rest: items = (items,)+rest
         if items is None: items = []
-        if (use_list is not None) or not hasattr(items,'__array__'):
+        if (use_list is not None) or not _is_array(items):
             items = list(items) if use_list else _listify(items)
         if match is not None:
             if len(items)==1: items = items*len(match)
@@ -278,6 +282,7 @@ class L(CollBase, GetAttr, metaclass=NewChkMeta):
     def __iter__(self): return (self[i] for i in range(len(self)))
     def __repr__(self): return coll_repr(self)
     def __eq__(self,b): return all_equal(b,self)
+    def __contains__(self,b): return b in self.items
     def __invert__(self): return self._new(not i for i in self)
     def __mul__ (a,b): return a._new(a.items*b)
     def __add__ (a,b): return a._new(a.items+_listify(b))
@@ -739,6 +744,3 @@ def camel2snake(name):
 class PrettyString(str):
     "Little hack to get strings to show properly in Jupyter."
     def __repr__(self): return self
-
-#Comes from 32_text_models_awdlstm.ipynb, cell
-def one_param(m): return next(iter(m.parameters()))
