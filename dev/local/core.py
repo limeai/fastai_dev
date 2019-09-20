@@ -8,8 +8,8 @@ __all__ = ['defaults', 'PrePostInitMeta', 'BaseObj', 'NewChkMeta', 'BypassNewMet
            'ReindexCollection', 'lt', 'gt', 'le', 'ge', 'eq', 'ne', 'add', 'sub', 'mul', 'truediv', 'Inf', 'true',
            'stop', 'gen', 'chunked', 'retain_type', 'retain_types', 'show_title', 'ShowTitle', 'Int', 'Float', 'Str',
            'TupleBase', 'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'instantiate', '_0', '_1', '_2', '_3',
-           '_4', 'bind', 'Self', 'Self', 'sort_by_run', 'display_df', 'round_multiple', 'num_cpus', 'add_props',
-           'all_union', 'all_disjoint', 'camel2snake', 'PrettyString']
+           '_4', 'bind', 'Self', 'Self', 'get_file', 'sort_by_run', 'display_df', 'round_multiple', 'num_cpus',
+           'add_props', 'all_union', 'all_disjoint', 'camel2snake', 'PrettyString']
 
 #Cell
 from .test import *
@@ -281,7 +281,6 @@ class L(CollBase, GetAttr, metaclass=NewChkMeta):
     def default(self): return self.items
     def __iter__(self): return (self[i] for i in range(len(self)))
     def __repr__(self): return coll_repr(self)
-    def __eq__(self,b): return all_equal(b,self)
     def __contains__(self,b): return b in self.items
     def __invert__(self): return self._new(not i for i in self)
     def __mul__ (a,b): return a._new(a.items*b)
@@ -290,6 +289,10 @@ class L(CollBase, GetAttr, metaclass=NewChkMeta):
     def __addi__(a,b):
         a.items += list(b)
         return a
+
+    def __eq__(self,b):
+        if isinstance(b, (str,dict,set)): return False
+        return all_equal(b,self)
 
     def sorted(self, key=None, reverse=False):
         "New `L` sorted by `key`. If key is str then use `attrgetter`. If key is int then use `itemgetter`."
@@ -669,6 +672,13 @@ def ls(self:Path, file_type=None, file_exts=None):
     extns=L(file_exts)
     if file_type: extns += L(k for k,v in mimetypes.types_map.items() if v.startswith(file_type+'/'))
     return L(self.iterdir()).filtered(lambda x: len(extns)==0 or x.suffix in extns)
+
+#Cell
+def get_file(file, path, ext=''):
+    "Return `path/file` if file is a string or a `Path`, file otherwise"
+    if not isinstance(file, (Path, str)): return file
+    path.mkdir(parents=True, exist_ok=True)
+    return path/(f'{file}{ext}')
 
 #Cell
 def _is_instance(f, gs):
