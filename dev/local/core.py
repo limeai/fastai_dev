@@ -3,18 +3,18 @@
 __all__ = ['defaults', 'PrePostInitMeta', 'BaseObj', 'NewChkMeta', 'BypassNewMeta', 'patch_to', 'patch',
            'patch_property', 'use_kwargs', 'delegates', 'funcs_kwargs', 'method', 'chk', 'add_docs', 'docs',
            'custom_dir', 'GetAttr', 'delegate_attr', 'coll_repr', 'mask2idxs', 'listable_types', 'CollBase', 'cycle',
-           'zip_cycle', 'L', 'ifnone', 'get_class', 'mk_class', 'wrap_class', 'store_attr', 'tuplify', 'replicate',
-           'uniqueify', 'setify', 'is_listy', 'range_of', 'groupby', 'merge', 'shufflish', 'IterLen',
-           'ReindexCollection', 'lt', 'gt', 'le', 'ge', 'eq', 'ne', 'add', 'sub', 'mul', 'truediv', 'Inf', 'true',
-           'stop', 'gen', 'chunked', 'retain_type', 'retain_types', 'show_title', 'ShowTitle', 'Int', 'Float', 'Str',
-           'TupleBase', 'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'instantiate', '_0', '_1', '_2', '_3',
-           '_4', 'bind', 'Self', 'Self', 'get_file', 'sort_by_run', 'display_df', 'round_multiple', 'num_cpus',
-           'add_props', 'all_union', 'all_disjoint', 'camel2snake', 'PrettyString']
+           'zip_cycle', 'is_indexer', 'L', 'ifnone', 'get_class', 'mk_class', 'wrap_class', 'store_attr', 'attrdict',
+           'properties', 'tuplify', 'replicate', 'uniqueify', 'setify', 'is_listy', 'range_of', 'groupby', 'merge',
+           'shufflish', 'IterLen', 'ReindexCollection', 'lt', 'gt', 'le', 'ge', 'eq', 'ne', 'add', 'sub', 'mul',
+           'truediv', 'Inf', 'true', 'stop', 'gen', 'chunked', 'retain_type', 'retain_types', 'show_title', 'ShowTitle',
+           'Int', 'Float', 'Str', 'TupleBase', 'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'mapped',
+           'instantiate', '_0', '_1', '_2', '_3', '_4', 'bind', 'Self', 'Self', 'bunzip', 'join_path_file',
+           'sort_by_run', 'display_df', 'round_multiple', 'num_cpus', 'add_props', 'camel2snake', 'PrettyString']
 
 #Cell
 from .test import *
 from .imports import *
-from .notebook.showdoc import show_doc
+from .notebook.showdoc import *
 
 #Cell
 defaults = SimpleNamespace()
@@ -201,23 +201,6 @@ def delegate_attr(self, k, to):
     except AttributeError: raise AttributeError(k) from None
 
 #Cell
-def coll_repr(c, max_n=10):
-    "String repr of up to `max_n` items of (possibly lazy) collection `c`"
-    return f'(#{len(c)}) [' + ','.join(itertools.islice(map(str,c), max_n)) + (
-        '...' if len(c)>10 else '') + ']'
-
-#Cell
-def mask2idxs(mask):
-    "Convert bool mask or index list to index `L`"
-    mask = list(mask)
-    if len(mask)==0: return []
-    if isinstance(mask[0],bool): return [i for i,m in enumerate(mask) if m]
-    return [int(i) for i in mask]
-
-#Cell
-listable_types = typing.Collection,Generator,map,filter,zip
-
-#Cell
 def _is_array(x): return hasattr(x,'__array__') or hasattr(x,'iloc')
 
 def _listify(o):
@@ -226,6 +209,24 @@ def _listify(o):
     if isinstance(o, str) or _is_array(o): return [o]
     if is_iter(o): return list(o)
     return [o]
+
+#Cell
+def coll_repr(c, max_n=10):
+    "String repr of up to `max_n` items of (possibly lazy) collection `c`"
+    return f'(#{len(c)}) [' + ','.join(itertools.islice(map(str,c), max_n)) + (
+        '...' if len(c)>10 else '') + ']'
+
+#Cell
+def mask2idxs(mask):
+    "Convert bool mask or index list to index `L`"
+    if isinstance(mask,slice): return mask
+    mask = list(mask)
+    if len(mask)==0: return []
+    if isinstance(mask[0],bool): return [i for i,m in enumerate(mask) if m]
+    return [int(i) for i in mask]
+
+#Cell
+listable_types = typing.Collection,Generator,map,filter,zip
 
 #Cell
 class CollBase:
@@ -237,7 +238,6 @@ class CollBase:
     def __delitem__(self, i): del(self.items[i])
     def __repr__(self): return self.items.__repr__()
     def __iter__(self): return self.items.__iter__()
-    def _new(self, items, *args, **kwargs): return self.__class__(items, *args, **kwargs)
 
 #Cell
 def cycle(o):
@@ -250,9 +250,13 @@ def zip_cycle(x, *args):
     return zip(x, *map(cycle,args))
 
 #Cell
+def is_indexer(idx):
+    "Test whether `idx` will index a single item in a list"
+    return isinstance(idx,int) or not getattr(idx,'ndim',1)
+
+#Cell
 class L(CollBase, GetAttr, metaclass=NewChkMeta):
     "Behaves like a list of `items` but can also index with list of indices or masks"
-    _xtra =  [o for o in dir([]) if not o.startswith('_')]
     def __init__(self, items=None, *rest, use_list=False, match=None):
         if rest: items = (items,)+rest
         if items is None: items = []
@@ -263,9 +267,11 @@ class L(CollBase, GetAttr, metaclass=NewChkMeta):
             else: assert len(items)==len(match), 'Match length mismatch'
         super().__init__(items)
 
-    def __getitem__(self, idx): return L(self._gets(idx), use_list=None) if is_iter(idx) else self._get(idx)
-    def _get(self, i): return getattr(self.items,'iloc',self.items)[i]
-    def _gets(self, i):
+    def _new(self, items, *args, **kwargs): return type(self)(items, *args, use_list=None, **kwargs)
+    def __getitem__(self, idx): return self._get(idx) if is_indexer(idx) else L(self._get(idx), use_list=None)
+
+    def _get(self, i):
+        if is_indexer(i) or isinstance(i,slice): return getattr(self.items,'iloc',self.items)[i]
         i = mask2idxs(i)
         return (self.items.iloc[list(i)] if hasattr(self.items,'iloc')
                 else self.items.__array__()[(i,)] if hasattr(self.items,'__array__')
@@ -279,20 +285,17 @@ class L(CollBase, GetAttr, metaclass=NewChkMeta):
 
     @property
     def default(self): return self.items
-    def __iter__(self): return (self[i] for i in range(len(self)))
-    def __repr__(self): return coll_repr(self)
+    def __iter__(self): return iter(self.items.itertuples() if hasattr(self.items,'iloc') else self.items)
     def __contains__(self,b): return b in self.items
     def __invert__(self): return self._new(not i for i in self)
+    def __eq__(self,b): return False if isinstance(b, (str,dict,set)) else all_equal(b,self)
+    def __repr__(self): return repr(self.items) if _is_array(self.items) else coll_repr(self)
     def __mul__ (a,b): return a._new(a.items*b)
     def __add__ (a,b): return a._new(a.items+_listify(b))
     def __radd__(a,b): return a._new(b)+a
     def __addi__(a,b):
         a.items += list(b)
         return a
-
-    def __eq__(self,b):
-        if isinstance(b, (str,dict,set)): return False
-        return all_equal(b,self)
 
     def sorted(self, key=None, reverse=False):
         "New `L` sorted by `key`. If key is str then use `attrgetter`. If key is int then use `itemgetter`."
@@ -392,6 +395,16 @@ def store_attr(self, nms):
     "Store params named in comma-separated `nms` from calling context into attrs in `self`"
     mod = inspect.currentframe().f_back.f_locals
     for n in re.split(', *', nms): setattr(self,n,mod[n])
+
+#Cell
+def attrdict(o, *ks):
+    "Dict from each `k` in `ks` to `getattr(o,k)`"
+    return {k:getattr(o,k) for k in ks}
+
+#Cell
+def properties(cls, *ps):
+    "Change attrs in `cls` with names in `ps` to properties"
+    for p in ps: setattr(cls,p,property(getattr(cls,p)))
 
 #Cell
 def tuplify(o, use_list=False, match=None):
@@ -613,6 +626,11 @@ def partialler(f, *args, order=None, **kwargs):
     return fnew
 
 #Cell
+def mapped(f, it):
+    "map `f` over `it`, unless it's not listy, in which case return `f(it)`"
+    return L(it).mapped(f) if is_listy(it) else f(it)
+
+#Cell
 def instantiate(t):
     "Instantiate `t` if it's a type, otherwise do nothing"
     return t() if isinstance(t, type) else t
@@ -674,11 +692,21 @@ def ls(self:Path, file_type=None, file_exts=None):
     return L(self.iterdir()).filtered(lambda x: len(extns)==0 or x.suffix in extns)
 
 #Cell
-def get_file(file, path, ext=''):
+def bunzip(fn):
+    "bunzip `fn`, raising exception if output already exists"
+    fn = Path(fn)
+    assert fn.exists(), f"{fn} doesn't exist"
+    out_fn = fn.with_suffix('')
+    assert not out_fn.exists(), f"{out_fn} already exists"
+    with bz2.BZ2File(fn, 'rb') as src, out_fn.open('wb') as dst:
+        for d in iter(lambda: src.read(1024*1024), b''): dst.write(d)
+
+#Cell
+def join_path_file(file, path, ext=''):
     "Return `path/file` if file is a string or a `Path`, file otherwise"
-    if not isinstance(file, (Path, str)): return file
+    if not isinstance(file, (str, Path)): return file
     path.mkdir(parents=True, exist_ok=True)
-    return path/(f'{file}{ext}')
+    return path/f'{file}{ext}'
 
 #Cell
 def _is_instance(f, gs):
@@ -731,16 +759,6 @@ defaults.cpus = num_cpus()
 def add_props(f, n=2):
     "Create properties passing each of `range(n)` to f"
     return (property(partial(f,i)) for i in range(n))
-
-#Comes from 06_data_source.ipynb, cell
-def all_union(sets):
-    "Set of union of all `sets` (each `setified` if needed)"
-    return set().union(*(map(setify,sets)))
-
-#Comes from 06_data_source.ipynb, cell
-def all_disjoint(sets):
-    "`True` iif no element appears in more than one item of `sets`"
-    return sum(map(len,sets))==len(all_union(sets))
 
 #Comes from 13_learner.ipynb, cell
 _camel_re1 = re.compile('(.)([A-Z][a-z]+)')
