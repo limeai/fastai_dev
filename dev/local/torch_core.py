@@ -2,9 +2,10 @@
 
 __all__ = ['tensor', 'set_seed', 'TensorBase', 'concat', 'Chunks', 'one_param', 'apply', 'to_detach', 'to_half',
            'to_float', 'default_device', 'to_device', 'to_cpu', 'to_np', 'item_find', 'find_device', 'find_bs',
-           'Module', 'get_model', 'one_hot', 'one_hot_decode', 'trainable_params', 'bn_types', 'bn_bias_params',
-           'batch_to_samples', 'make_cross_image', 'show_title', 'show_image', 'show_titled_image', 'show_image_batch',
-           'requires_grad', 'init_default', 'cond_init', 'apply_leaf', 'apply_init', 'flatten_check']
+           'Module', 'get_model', 'one_hot', 'one_hot_decode', 'params', 'trainable_params', 'bn_types',
+           'bn_bias_params', 'batch_to_samples', 'make_cross_image', 'show_title', 'show_image', 'show_titled_image',
+           'show_image_batch', 'requires_grad', 'init_default', 'cond_init', 'apply_leaf', 'apply_init',
+           'flatten_check']
 
 #Cell
 from .test import *
@@ -88,7 +89,7 @@ _patch_tb()
 @patch
 def tensored(self:L):
     "`mapped(tensor)`"
-    return self.mapped(tensor)
+    return self.map(tensor)
 @patch
 def stack(self:L, dim=0):
     "Same as `torch.stack`"
@@ -222,7 +223,7 @@ def find_bs(b):
 #Cell
 class Module(nn.Module, metaclass=PrePostInitMeta):
     "Same as `nn.Module`, but no need for subclasses to call `super().__init__`"
-    def __pre_init__(self): super().__init__()
+    def __pre_init__(self, *args, **kwargs): super().__init__()
     def __init__(self): pass
 
 #Cell
@@ -244,6 +245,11 @@ def one_hot_decode(x, vocab=None):
     return L(vocab[i] if vocab else i for i,x_ in enumerate(x) if x_==1)
 
 #Cell
+def params(m):
+    "Return all parameters of `m`"
+    return [p for p in m.parameters()]
+
+#Cell
 def trainable_params(m):
     "Return all trainable parameters of `m`"
     return [p for p in m.parameters() if p.requires_grad]
@@ -254,8 +260,8 @@ bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
 #Cell
 def bn_bias_params(m, with_bias=True):
     "Return all bias and BatchNorm parameters"
-    if isinstance(m, bn_types): return list(m.parameters())
-    res = sum([bn_bias_params(c, with_bias) for c in m.children()], [])
+    if isinstance(m, bn_types): return L(m.parameters())
+    res = L(m.children()).map(bn_bias_params, with_bias=with_bias).concat()
     if with_bias and hasattr(m, 'bias'): res.append(m.bias)
     return res
 
@@ -264,8 +270,8 @@ def batch_to_samples(b, max_n=10):
     "'Transposes' a batch to (at most `max_n`) samples"
     if isinstance(b, Tensor): return list(b[:max_n])
     else:
-        res = L(b).mapped(partial(batch_to_samples,max_n=max_n))
-        return L(retain_types(res.zipped(), [b]))
+        res = L(b).map(partial(batch_to_samples,max_n=max_n))
+        return retain_types(res.zip(), [b])
 
 #Cell
 def make_cross_image(bw=True):

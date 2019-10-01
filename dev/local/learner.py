@@ -2,7 +2,8 @@
 
 __all__ = ['CancelFitException', 'CancelEpochException', 'CancelTrainException', 'CancelValidException',
            'CancelBatchException', 'class2attr', 'Callback', 'TrainEvalCallback', 'GatherPredsCallback', 'event',
-           'Learner', 'VerboseCallback', 'Metric', 'AvgMetric', 'AvgLoss', 'AvgSmoothLoss', 'Recorder']
+           'replacing_yield', 'mk_metric', 'save_model', 'load_model', 'Learner', 'VerboseCallback', 'Metric',
+           'AvgMetric', 'AvgLoss', 'AvgSmoothLoss', 'Recorder']
 
 #Cell
 from .torch_basics import *
@@ -17,23 +18,21 @@ def class2attr(self, cls_name):
     return camel2snake(re.sub(rf'{cls_name}$', '', self.__class__.__name__) or cls_name.lower())
 
 #Cell
-@docs
-class Callback():
+class Callback(GetAttr):
     "Basic class handling tweaks of the training loop by changing a `Learner` in various events"
-    def __call__(self, event_name): getattr(self, event_name, noop)()
-    def __repr__(self): return self.__class__.__name__
-    def __getattr__(self, k):
-        if k=='learn': raise AttributeError
-        if not hasattr(self,'learn'): raise AttributeError
-        return getattr(self.learn, k)
+    def __repr__(self): return type(self).__name__
+
+    def __call__(self, event_name):
+        "Call `self.{event_name}` if it's defined"
+        getattr(self, event_name, noop)()
+
+    @property
+    def default(self): return self.__dict__.get('learn')
 
     @property
     def name(self):
         "Name of the `Callback`, camel-cased and with '*Callback*' removed"
         return class2attr(self, 'Callback')
-
-    _docs=dict(__call__="Call `self.{event_name}` if it's defined",
-               __getattr__="Passthrough to get the attributes of `self.learn`")
 
 #Cell
 class TrainEvalCallback(Callback):
@@ -87,119 +86,145 @@ _ex_docs = dict(
 for c,d in _ex_docs.items(): mk_class(c,sup=Exception,doc=d)
 
 #Cell
-_events = 'begin_fit begin_epoch begin_train begin_batch after_pred after_loss \
+_events = L.split('begin_fit begin_epoch begin_train begin_batch after_pred after_loss \
     after_backward after_step after_cancel_batch after_batch after_cancel_train \
     after_train begin_validate after_cancel_validate after_validate after_cancel_epoch \
-    after_epoch after_cancel_fit after_fit'.split()
+    after_epoch after_cancel_fit after_fit')
 
-mk_class('event', **{o:o for o in _events},
+mk_class('event', **_events.map_dict(),
          doc="All possible events as attributes to get tab-completion and typo-proofing")
 
+_before_inference = [event.begin_fit, event.begin_epoch, event.begin_validate]
+_after_inference  = [event.after_validate, event.after_epoch, event.after_fit]
+
 #Cell
+defaults.lr = slice(3e-3)
+defaults.wd = 1e-2
 defaults.callbacks = [TrainEvalCallback]
 
+#Cell
+def replacing_yield(o, attr, val):
+    "Context manager to temporarily replace an attribute"
+    old = getattr(o,attr)
+    try:     yield setattr(o,attr,val)
+    finally: setattr(o,attr,old)
+
+#Cell
+def mk_metric(m):
+    "Convert `m` to an `AvgMetric`, unless it's already a `Metric`"
+    return m if isinstance(m, Metric) else AvgMetric(m)
+
+#Cell
+def save_model(file, model, opt, with_opt=True):
+    "Save `model` to `file` along with `opt` (if available, and if `with_opt`)"
+    if opt is None: with_opt=False
+    state = get_model(model).state_dict()
+    if with_opt: state = {'model': state, 'opt':opt.state_dict()}
+    torch.save(state, file)
+
+#Cell
+def load_model(file, model, opt, with_opt=None, device=None, strict=True):
+    "Load `model` from `file` along with `opt` (if available, and if `with_opt`)"
+    if isinstance(device, int): device = torch.device('cuda', device)
+    state = torch.load(file)
+    hasopt = set(state)=={'model', 'opt'}
+    model_state = state['model'] if hasopt else state
+    get_model(model).load_state_dict(model_state, strict=strict)
+    if hasopt and ifnone(with_opt,True):
+        try: opt.load_state_dict(state['opt'])
+        except:
+            if with_opt: warn("Could not load the optimizer state.")
+    elif with_opt: warn("Saved filed doesn't contain an optimizer state.")
+
+#Cell
 class Learner():
-    "Group together a `model`, some `dbunch` and a `loss_func` to handle training"
-    def __init__(self, dbunch, model, loss_func=None, opt_func=SGD, lr=1e-2, splitter=trainable_params, cbs=None,
+    def __init__(self, dbunch, model, loss_func=None, opt_func=SGD, lr=defaults.lr, splitter=trainable_params, cbs=None,
                  cb_funcs=None, metrics=None, path=None, model_dir='models', wd_bn_bias=False, train_bn=True):
         store_attr(self, "dbunch,model,opt_func,lr,splitter,model_dir,wd_bn_bias,train_bn")
+        self.training,self.logger,self.opt,self.cbs = False,print,None,L()
         #TODO: infer loss_func from data
         self.loss_func = CrossEntropyLossFlat() if loss_func is None else loss_func
         self.path = path if path is not None else getattr(dbunch, 'path', Path('.'))
-        self.metrics = [m if isinstance(m, Metric) else AvgMetric(m) for m in L(metrics)]
-        self.training,self.logger,self.opt = False,print,None
-        self.cbs = L([])
-        self.add_cbs(cbf() for cbf in L(defaults.callbacks))
+        self.metrics = L(metrics).map(mk_metric)
+        self.add_cbs(cbf() for cbf in L(defaults.callbacks)+L(cb_funcs))
         self.add_cbs(cbs)
-        self.add_cbs(cbf() for cbf in L(cb_funcs))
+        self.model.to(self.dbunch.device)
 
-    def add_cbs(self, cbs):
-        "Add `cbs` to the list of `Callback` and register `self` as their learner"
-        for cb in L(cbs): self.add_cb(cb)
-
+    def add_cbs(self, cbs): L(cbs).map(self.add_cb)
+    def remove_cbs(self, cbs): L(cbs).map(self.remove_cb)
     def add_cb(self, cb):
-        "Add `cb` to the list of `Callback` and register `self` as their learner"
-        if getattr(self, cb.name, None):
-            error = f"There is another object registered in self.{cb.name}, pick a new name."
-            assert isinstance(getattr(self, cb.name), cb.__class__), error
+        old = getattr(self, cb.name, None)
+        assert not old or isinstance(old, type(cb)), f"self.{cb.name} already registered"
         cb.learn = self
         setattr(self, cb.name, cb)
         self.cbs.append(cb)
 
-    def remove_cbs(self, cbs):
-        "Remove `cbs` from the list of `Callback` and deregister `self` as their learner"
-        for cb in L(cbs): self.remove_cb(cb)
-
     def remove_cb(self, cb):
-        "Add `cb` from the list of `Callback` and deregister `self` as their learner"
         cb.learn = None
-        setattr(self, cb.name, None)
+        if hasattr(self, cb.name): delattr(self, cb.name)
         if cb in self.cbs: self.cbs.remove(cb)
 
     @contextmanager
     def added_cbs(self, cbs):
-        "Context manage that temporarily adds `cbs`"
         self.add_cbs(cbs)
         yield
         self.remove_cbs(cbs)
 
-    def create_opt(self, lr=None):
-        "Create an optimizer with `lr`"
-        opt = self.opt_func(self.splitter(self.model), lr=self.lr if lr is None else lr)
-        if not self.wd_bn_bias:
-            for p in bn_bias_params(self.model):
-                opt.state[p] = {**opt.state.get(p, {}), 'do_wd': False}
-        if self.train_bn:
-            for p in bn_bias_params(self.model, with_bias=False):
-                opt.state[p] = {**opt.state.get(p, {}), 'force_train': True}
-        return opt
+    def __call__(self, event_name): L(event_name).map(self._call_one)
+    def _call_one(self, event_name):
+        assert hasattr(event, event_name)
+        [cb(event_name) for cb in sort_by_run(self.cbs)]
 
-    def one_batch(self, xb, yb, i=None):
-        "Train or evaluate `self.model` on batch `(xb,yb)`"
-        try:
-            if i is not None: self.iter = i
-            self.xb,self.yb = xb,yb;                        self('begin_batch')
-            self.pred = self.model(self.xb);                self('after_pred')
-            self.loss = self.loss_func(self.pred, self.yb); self('after_loss')
-            if not self.training: return
-            self.loss.backward();                           self('after_backward')
-            self.opt.step();                                self('after_step')
-            self.opt.zero_grad()
-        except CancelBatchException:                        self('after_cancel_batch')
-        finally:                                            self('after_batch')
+    def _bn_bias_state(self, with_bias): return bn_bias_params(self.model, with_bias).map(self.opt.state)
+    def create_opt(self):
+        self.opt = self.opt_func(self.splitter(self.model), lr=self.lr)
+        if not self.wd_bn_bias:
+            for p in self._bn_bias_state(True ): p['do_wd'] = False
+        if self.train_bn:
+            for p in self._bn_bias_state(False): p['force_train'] = True
+
+    def _split(self, b):
+        i = getattr(self.dbunch, 'inp_idx', 1)
+        return b[:i],b[i:]
 
     def all_batches(self):
-        "Train or evaluate `self.model` on all batches of `self.dl`"
         self.n_iter = len(self.dl)
-        for i,(xb,yb) in enumerate(self.dl): self.one_batch(xb, yb, i)
+        for o in enumerate(self.dl): self.one_batch(*o)
+
+    def one_batch(self, i, b):
+        try:
+            self.iter,(self.xb,self.yb) = i,self._split(b);  self('begin_batch')
+            self.pred = self.model(*self.xb);                self('after_pred')
+            if len(self.yb) == 0: return
+            self.loss = self.loss_func(self.pred, *self.yb); self('after_loss')
+            if not self.training: return
+            self.loss.backward();                            self('after_backward')
+            self.opt.step();                                 self('after_step')
+            self.opt.zero_grad()
+        except CancelBatchException:                         self('after_cancel_batch')
+        finally:                                             self('after_batch')
 
     def _do_begin_fit(self, n_epoch):
-        "Prepare evertyhing for training `epochs` epochs"
-        self.n_epoch,self.loss = n_epoch,tensor(0.)
-        self('begin_fit')
+        self.n_epoch,self.loss = n_epoch,tensor(0.);         self('begin_fit')
 
     def _do_epoch_train(self):
-        "Execute the training part of the `epoch`-th epoch"
-        self.dl = self.dbunch.train_dl
         try:
-            self('begin_train')
+            self.dl = self.dbunch.train_dl;                  self('begin_train')
             self.all_batches()
-        except CancelTrainException: self('after_cancel_train')
-        finally:                     self('after_train')
+        except CancelTrainException:                         self('after_cancel_train')
+        finally:                                             self('after_train')
 
     def _do_epoch_validate(self):
-        "Execute the validation part of an epoch"
         try:
-            self.dl = self.dbunch.valid_dl
-            self('begin_validate')
+            self.dl = self.dbunch.valid_dl;                  self('begin_validate')
             with torch.no_grad(): self.all_batches()
-        except CancelValidException: self('after_cancel_validate')
-        finally:                     self('after_validate')
+        except CancelValidException:                         self('after_cancel_validate')
+        finally:                                             self('after_validate')
 
-    def fit(self, n_epoch, lr=None, cbs=None, reset_opt=False):
-        "Fit `self.model` for `n_epoch` using `cbs`. Optionally `reset_opt`."
+    def fit(self, n_epoch, lr=None, wd=defaults.wd, cbs=None, reset_opt=False):
         with self.added_cbs(cbs):
-            if reset_opt or not self.opt: self.opt = self.create_opt(lr=lr)
+            if reset_opt or not self.opt: self.create_opt()
+            self.opt.set_hypers(wd=wd, lr=self.lr if lr is None else lr)
 
             try:
                 self._do_begin_fit(n_epoch)
@@ -211,86 +236,67 @@ class Learner():
                     except CancelEpochException:   self('after_cancel_epoch')
                     finally:                       self('after_epoch')
 
-            except CancelFitException: self('after_cancel_fit')
-            finally:                   self('after_fit')
+            except CancelFitException:             self('after_cancel_fit')
+            finally:                               self('after_fit')
 
     def validate(self, dl=None, cbs=None):
-        "Validate on `dl` with potential new `cbs`."
+        self.epoch,self.n_epoch,self.loss = 0,1,tensor(0.)
         self.dl = dl or self.dbunch.valid_dl
         with self.added_cbs(cbs), self.no_logging():
-            self(['begin_fit', 'begin_epoch', 'begin_validate'])
+            self(_before_inference)
             self.all_batches()
-            self(['after_validate', 'after_epoch', 'after_fit'])
+            self(_after_inference)
         return self.recorder.values[-1]
 
     def get_preds(self, ds_idx=1, with_loss=False):
-        "Get the predictions and targets on the `ds_idx`-th dbunchset, optionally `with_loss`"
+        self.epoch,self.n_epoch,self.loss = 0,1,tensor(0.)
         self.dl = self.dbunch.dls[ds_idx]
         cb = GatherPredsCallback(with_loss=with_loss)
         with self.no_logging(), self.added_cbs(cb), self.loss_not_reduced():
-            self(['begin_fit', 'begin_epoch', 'begin_validate'])
+            self(_before_inference)
             self.all_batches()
-            self(['after_validate', 'after_epoch', 'after_fit'])
-            if with_loss: return (torch.cat(cb.preds),torch.cat(cb.targets),torch.cat(cb.losses))
-            res = (torch.cat(cb.preds),torch.cat(cb.targets))
-        return res
-
-    def __call__(self, event_name):
-        "Call `event_name` (one or a list) for all callbacks"
-        for e in L(event_name): self._call_one(e)
-
-    def _call_one(self, event_name):
-        assert hasattr(event, event_name)
-        [cb(event_name) for cb in sort_by_run(self.cbs)]
+            self(_after_inference)
+            if with_loss: return torch.cat(cb.preds),torch.cat(cb.targets),torch.cat(cb.losses)
+            return torch.cat(cb.preds),torch.cat(cb.targets)
 
     @contextmanager
-    def no_logging(self):
-        "Context manager to temporarily remove `logger`"
-        old_logger = self.logger
-        self.logger = noop
-        yield
-        self.logger = old_logger
+    def no_logging(self): return replacing_yield(self, 'logger', noop)
 
     @contextmanager
     def loss_not_reduced(self):
-        "A context manager to evaluate `loss_func` with reduction set to none."
-        if hasattr(self.loss_func, 'reduction'):
-            self.old_red = self.loss_func.reduction
-            self.loss_func.reduction = 'none'
-            yield
-            self.loss_func.reduction = self.old_red
-        else:
-            old_loss_func = self.loss_func
-            self.loss_func = partial(self.loss_func, reduction='none')
-            yield
-            self.loss_func = old_loss_func
+        if hasattr(self.loss_func, 'reduction'): return replacing_yield(self.loss_func, 'reduction', 'none')
+        else: return replacing_yield(self, 'loss_func', partial(self.loss_func, reduction='none'))
 
     def save(self, file, with_opt=True):
-        "Save model and optimizer state (if `with_opt`) to `self.path/self.model_dir/file`"
         #TODO: if rank_distrib(): return # don't save if slave proc
-        if not hasattr(self, 'opt'): with_opt=False
-        if not with_opt: state = get_model(self.model).state_dict()
-        else: state = {'model': get_model(self.model).state_dict(), 'opt':self.opt.state_dict()}
-        torch.save(state, join_path_file(file, self.path/self.model_dir, ext='.pth'))
+        file = join_path_file(file, self.path/self.model_dir, ext='.pth')
+        save_model(file, self.model, getattr(self,'opt',None), with_opt)
 
     def load(self, file, with_opt=None, device=None, strict=True):
-        "Load model and optimizer state (if `with_opt`) from `self.path/self.model_dir/file` using `device`"
         if device is None: device = self.dbunch.device
-        elif isinstance(device, int): device = torch.device('cuda', device)
-        state = torch.load(join_path_file(file, self.path/self.model_dir, ext='.pth'))
-        if set(state.keys()) == {'model', 'opt'}:
-            model_state = state['model']
-            get_model(self.model).load_state_dict(model_state, strict=strict)
-            if ifnone(with_opt,True):
-                if self.opt is None: self.opt = self.create_opt(self.lr)
-                try:    self.opt.load_state_dict(state['opt'])
-                except:
-                    if with_opt: warn("Could not load the optimizer state.")
-                    pass
-        else:
-            if with_opt: warn("Saved filed doesn't contain an optimizer state.")
-            get_model(self.model).load_state_dict(state, strict=strict)
+        if self.opt is None: self.create_opt()
+        file = join_path_file(file, self.path/self.model_dir, ext='.pth')
+        load_model(file, self.model, self.opt, with_opt=with_opt, device=device, strict=strict)
         return self
+
+#Cell
+add_docs(Learner, "Group together a `model`, some `dbunch` and a `loss_func` to handle training",
+    add_cbs="Add `cbs` to the list of `Callback` and register `self` as their learner",
+    add_cb="Add `cb` to the list of `Callback` and register `self` as their learner",
+    remove_cbs="Remove `cbs` from the list of `Callback` and deregister `self` as their learner",
+    remove_cb="Add `cb` from the list of `Callback` and deregister `self` as their learner",
+    added_cbs="Context manage that temporarily adds `cbs`",
+    create_opt="Create an optimizer with `lr`",
+    one_batch="Train or evaluate `self.model` on batch `(xb,yb)`",
+    all_batches="Train or evaluate `self.model` on all batches of `self.dl`",
+    fit="Fit `self.model` for `n_epoch` using `cbs`. Optionally `reset_opt`.",
+    validate="Validate on `dl` with potential new `cbs`.",
+    get_preds="Get the predictions and targets on the `ds_idx`-th dbunchset, optionally `with_loss`",
+    no_logging="Context manager to temporarily remove `logger`",
+    loss_not_reduced="A context manager to evaluate `loss_func` with reduction set to none.",
+    save="Save model and optimizer state (if `with_opt`) to `self.path/self.model_dir/file`",
+    load="Load model and optimizer state (if `with_opt`) from `self.path/self.model_dir/file` using `device`"
+)
 
 #Cell
 class VerboseCallback(Callback):
@@ -303,7 +309,7 @@ class VerboseCallback(Callback):
 @docs
 class Metric():
     "Blueprint for defining a metric"
-    def reset(self):             pass
+    def reset(self): pass
     def accumulate(self, learn): pass
     @property
     def value(self): raise NotImplementedError
@@ -311,10 +317,11 @@ class Metric():
     @property
     def name(self): return class2attr(self, 'Metric')
 
-    _docs = {'reset': "Reset inner state to prepare for new computation",
-            'name': "Name of the `Metric`, camel-cased and with Metric removed",
-            'accumulate': "Use `learn` to update the state with new results",
-            'value': "The value of the metric"}
+    _docs = dict(
+        reset="Reset inner state to prepare for new computation",
+        name="Name of the `Metric`, camel-cased and with Metric removed",
+        accumulate="Use `learn` to update the state with new results",
+        value="The value of the metric")
 
 #Cell
 class AvgMetric(Metric):
@@ -336,7 +343,7 @@ class AvgLoss(Metric):
     def reset(self):           self.total,self.count = 0.,0
     def accumulate(self, learn):
         bs = find_bs(learn.yb)
-        self.total += to_detach(learn.loss)*bs
+        self.total += to_detach(learn.loss.mean())*bs
         self.count += bs
     @property
     def value(self): return self.total/self.count if self.count != 0 else None
@@ -350,7 +357,7 @@ class AvgSmoothLoss(Metric):
     def reset(self):               self.count,self.val = 0,tensor(0.)
     def accumulate(self, learn):
         self.count += 1
-        self.val = torch.lerp(to_detach(learn.loss), self.val, self.beta)
+        self.val = torch.lerp(to_detach(learn.loss.mean()), self.val, self.beta)
     @property
     def value(self): return self.val/(1-self.beta**self.count)
 
@@ -358,8 +365,10 @@ class AvgSmoothLoss(Metric):
 from fastprogress.fastprogress import format_time
 
 def _maybe_item(t):
-    return t.item() if t.numel()==1 else t
+    t = t.value
+    return t.item() if isinstance(t, Tensor) and t.numel()==1 else t
 
+#Cell
 class Recorder(Callback):
     "Callback that registers statistics (lr, loss and metrics) during training"
     run_after = TrainEvalCallback
@@ -371,16 +380,16 @@ class Recorder(Callback):
     def begin_fit(self):
         "Prepare state for training"
         self.lrs,self.losses,self.values = [],[],[]
-        names = [m.name for m in self._valid_mets]
-        if self.train_metrics: names = [f'train_{n}' for n in names] + [f'valid_{n}' for n in names]
-        else:                  names = ['train_loss', 'valid_loss'] + names[1:]
+        names = self._valid_mets.attrgot('name')
+        if self.train_metrics: names = names.map('train_{}') + names.map('valid_{}')
+        else:                  names = L('train_loss', 'valid_loss') + names[1:]
         if self.add_time: names.append('time')
-        self.metric_names = ['epoch']+names
+        self.metric_names = 'epoch'+names
         self.smooth_loss.reset()
 
     def after_batch(self):
         "Update all metrics and records lr and smooth loss in training"
-        mets = [self.smooth_loss] + self._train_mets if self.training else self._valid_mets
+        mets = L(self.smooth_loss) + (self._train_mets if self.training else self._valid_mets)
         for met in mets: met.accumulate(self.learn)
         if not self.training: return
         self.lrs.append(self.opt.hypers[-1]['lr'])
@@ -391,13 +400,12 @@ class Recorder(Callback):
         "Set timer if `self.add_time=True`"
         self.cancel_train,self.cancel_valid = False,False
         if self.add_time: self.start_epoch = time.time()
-        self.log = [getattr(self, 'epoch', 0)]
+        self.log = L(getattr(self, 'epoch', 0))
 
-    def begin_train   (self): [m.reset() for m in self._train_mets]
-    def after_train   (self): self.log += [_maybe_item(m.value) for m in self._train_mets]
-    def begin_validate(self): [m.reset() for m in self._valid_mets]
-    def after_validate(self): self.log += [_maybe_item(m.value) for m in self._valid_mets]
-
+    def begin_train   (self): self._train_mets.map(Self.reset())
+    def begin_validate(self): self._valid_mets.map(Self.reset())
+    def after_train   (self): self.log += self._train_mets.map(_maybe_item)
+    def after_validate(self): self.log += self._valid_mets.map(_maybe_item)
     def after_cancel_train(self):    self.cancel_train = True
     def after_cancel_validate(self): self.cancel_valid = True
 
@@ -409,14 +417,15 @@ class Recorder(Callback):
 
     @property
     def _train_mets(self):
-        if getattr(self, 'cancel_train', False): return []
-        return [self.loss] + (self.metrics if self.train_metrics else [])
+        if getattr(self, 'cancel_train', False): return L()
+        return L(self.loss) + (self.metrics if self.train_metrics else L())
+
     @property
     def _valid_mets(self):
-        if getattr(self, 'cancel_valid', False): return []
-        return [self.loss] + self.metrics
+        if getattr(self, 'cancel_valid', False): return L()
+        return L(self.loss) + self.metrics
 
-    def plot_loss(self): plt.plot(self.losses)
+    def plot_loss(self, skip_start=5): plt.plot(self.losses[skip_start:])
 
 #Cell
 add_docs(Recorder,
@@ -426,14 +435,14 @@ add_docs(Recorder,
          after_validate = "Log loss and metric values on the validation set",
          after_cancel_train = "Ignore training metrics for this epoch",
          after_cancel_validate = "Ignore validation metrics for this epoch",
-         plot_loss = "Plot the losses")
+         plot_loss = "Plot the losses from `skip_start` and onward")
 
 defaults.callbacks = [TrainEvalCallback, Recorder]
 
 #Cell
 @patch
 def freeze_to(self:Learner, n):
-    if self.opt is None: self.opt = self.create_opt(lr=self.lr)
+    if self.opt is None: self.create_opt()
     self.opt.freeze_to(n)
 
 @patch
@@ -441,3 +450,8 @@ def freeze(self:Learner): self.freeze_to(-1)
 
 @patch
 def unfreeze(self:Learner): self.freeze_to(0)
+
+add_docs(Learner,
+         freeze_to="Freeze parameter groups up to `n`",
+         freeze="Freeze up to last parameter group",
+         unfreeze="Unfreeze the entire model")

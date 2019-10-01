@@ -7,7 +7,7 @@ __all__ = ['Optimizer', 'sgd_step', 'weight_decay', 'l2_reg', 'average_grad', 'a
 #Cell
 from .torch_basics import *
 from .test import *
-from .notebook.showdoc import show_doc
+from .notebook.showdoc import *
 
 #Cell
 class Optimizer():
@@ -15,12 +15,13 @@ class Optimizer():
     _keep_on_clear = ['force_train', 'do_wd']
     def __init__(self, params, steppers, stats=None, train_bn=True, **defaults):
         steppers,params = L(steppers),L(params)
-        self.stats,self.state,self.train_bn = L(stats),{},train_bn
-        for stat in self.stats: defaults = {**getattr(stat, 'defaults', {}), **defaults}
-        for step in steppers: defaults = {**getattr(step, 'defaults', {}), **defaults}
+        self.stats,self.state,self.train_bn = L(stats),defaultdict(dict),train_bn
+        defaults = merge(*self.stats.attrgot('defaults'), *steppers.attrgot('defaults'), defaults)
         self.param_groups = params if isinstance(params[0], (L,list)) else L([params])
         self.step_func = compose(*steppers)
-        self.hypers = L({**defaults} for p in self.param_groups)
+        self.hypers = L({} for _ in range_of(self.param_groups))
+        self.set_hypers(**defaults)
+        self.frozen_idx = 0
 
     def _grad_params(self):
         "Helper function to loop over param groups then params that have a grad"
@@ -34,15 +35,18 @@ class Optimizer():
 
     def step(self):
         for p,hyper in self._grad_params():
-            state = self.state.get(p, {})
+            state = self.state[p]
             for stat in self.stats: state = stat(state, p, **hyper)
             self.step_func(p, **{**state, **hyper})
             self.state[p] = state
 
     def _set_require_grad(self, pg, rg):
-        for p in pg: p.requires_grad_(rg or self.state.get(p, {}).get('force_train', False))
+        for p in pg: p.requires_grad_(rg or self.state[p].get('force_train', False))
 
     def freeze_to(self, n):
+        self.frozen_idx = n if n >= 0 else len(self.param_groups) + n
+        if self.frozen_idx >= len(self.param_groups):
+            warn(f"Trying to freeze {self.frozen_idx} parameter groups when there are only {len(self.param_groups)}, the whole model is frozen.")
         for pg in self.param_groups[:n]: self._set_require_grad(pg, False)
         for pg in self.param_groups[n:]: self._set_require_grad(pg, True)
 
@@ -53,7 +57,7 @@ class Optimizer():
     def unfreeze(self): self.freeze_to(0)
 
     def state_dict(self):
-        state = [self.state.get(p, {}) for pg in self.param_groups for p in pg]
+        state = [self.state[p] for pg in self.param_groups for p in pg]
         return {'state': state, 'hypers': self.hypers}
 
     def load_state_dict(self, sd):
@@ -65,6 +69,16 @@ class Optimizer():
     def clear_state(self):
         for pg in self.param_groups:
             for p in pg: self.state[p] = {k: self.state[p][k] for k in self._keep_on_clear if k in self.state[p]}
+
+    def set_hypers(self, **kwargs): L(kwargs.items()).starmap(self.set_hyper)
+    def set_hyper(self, k, v):
+        if isinstance(v, slice):
+            if v.start: v = even_mults(v.start, v.stop, len(self.param_groups))
+            else: v = [v.stop/10]*(len(self.param_groups)-1) + [v.stop]
+        v = L(v, use_list=None)
+        if len(v)==1: v = v*len(self.param_groups)
+        assert len(v) == len(self.hypers), f"Trying to set {len(v)} values for {k} but there are {len(self.param_groups)} parameter groups."
+        for v_,h in zip(v, self.hypers): h[k] = v_
 
 #Cell
 def sgd_step(p, lr, **kwargs):

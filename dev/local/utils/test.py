@@ -6,9 +6,7 @@ __all__ = ['synth_dbunch', 'RegModel', 'synth_learner']
 from ..torch_basics import *
 from ..test import *
 from ..layers import *
-from ..data.pipeline import *
-from ..data.source import *
-from ..data.core import *
+from ..data.all import *
 from ..optimizer import *
 from ..learner import *
 from torch.utils.data import TensorDataset
@@ -34,6 +32,6 @@ class RegModel(Module):
 
 #Cell
 @delegates(Learner.__init__)
-def synth_learner(n_trn=10, n_val=2, cuda=False, **kwargs):
-    return Learner(synth_dbunch(n_train=n_trn,n_valid=n_val, cuda=cuda), RegModel(), loss_func=MSELossFlat(),
+def synth_learner(n_trn=10, n_val=2, cuda=False, lr=1e-3, **kwargs):
+    return Learner(synth_dbunch(n_train=n_trn,n_valid=n_val, cuda=cuda), RegModel(), lr=lr, loss_func=MSELossFlat(),
                    opt_func=partial(SGD, mom=0.9), **kwargs)

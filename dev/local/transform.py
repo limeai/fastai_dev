@@ -2,7 +2,7 @@
 
 __all__ = ['type_hints', 'anno_ret', 'cmp_instance', 'subplots', 'TensorImageBase', 'TensorImage', 'TensorImageBW',
            'TensorMask', 'TypeDispatch', 'Transform', 'InplaceTransform', 'TupleTransform', 'ItemTransform', 'get_func',
-           'Func', 'Sig', 'compose_tfms', 'mk_transform', 'gather_attrs', 'Pipeline']
+           'Func', 'Sig', 'compose_tfms', 'mk_transform', 'gather_attrs', 'gather_attr_names', 'Pipeline']
 
 #Cell
 from .torch_basics import *
@@ -51,6 +51,7 @@ class TensorImageBase(TensorBase):
         cols = cols or int(np.ceil(math.sqrt(n_samples)))
         figsize = (cols*3, rows*3) if figsize is None else figsize
         _,axs = subplots(rows, cols, figsize=figsize)
+        for ax in axs.flatten()[max_n:]: ax.set_axis_off()
         return axs.flatten()
 
 #Cell
@@ -76,7 +77,9 @@ class TypeDispatch:
 
     def add(self, f):
         "Add type `t` and function `f`"
-        self.funcs[_p1_anno(f) or object] = f
+        t = _p1_anno(f) or object
+        if not isinstance(t,tuple): t=(t,)
+        for t_ in t: self.funcs[t_] = f
         self._reset()
 
     def returns(self, x): return anno_ret(self[type(x)])
@@ -109,10 +112,9 @@ _tfm_methods = 'encodes','decodes','setups'
 
 class _TfmDict(dict):
     def __setitem__(self,k,v):
-        if k not in _tfm_methods or not isinstance(v,Callable): return super().__setitem__(k,v)
+        if k not in _tfm_methods or not callable(v): return super().__setitem__(k,v)
         if k not in self: super().__setitem__(k,TypeDispatch())
-        res = self[k]
-        res.add(v)
+        self[k].add(v)
 
 #Cell
 class _TfmMeta(type):
@@ -126,7 +128,7 @@ class _TfmMeta(type):
         n = getattr(f,'__name__',None)
         for nm in _tfm_methods:
             if not hasattr(cls,nm): setattr(cls, nm, TypeDispatch())
-        if isinstance(f,Callable) and n in _tfm_methods:
+        if callable(f) and n in _tfm_methods:
             getattr(cls,n).add(f)
             return f
         return super().__call__(*args, **kwargs)
@@ -234,6 +236,11 @@ def gather_attrs(o, k, nm):
     return res[0] if len(res)==1 else L(res)
 
 #Cell
+def gather_attr_names(o, nm):
+    "Used in __dir__ to collect all attrs `k` from `self.{nm}`"
+    return L(getattr(o,nm)).map(dir).concat().unique()
+
+#Cell
 class Pipeline:
     "A pipeline of composed (for encode/decode) transforms, setup with types"
     def __init__(self, funcs=None, as_item=False, filt=None):
@@ -241,12 +248,12 @@ class Pipeline:
         if isinstance(funcs, Pipeline): self.fs = funcs.fs
         else:
             if isinstance(funcs, Transform): funcs = [funcs]
-            self.fs = L(ifnone(funcs,[noop])).mapped(mk_transform).sorted(key='order')
-            for f in self.fs:
-                name = camel2snake(type(f).__name__)
-                a = getattr(self,name,None)
-                if a is not None: f = L(a)+f
-                setattr(self, name, f)
+            self.fs = L(ifnone(funcs,[noop])).map(mk_transform).sorted(key='order')
+        for f in self.fs:
+            name = camel2snake(type(f).__name__)
+            a = getattr(self,name,None)
+            if a is not None: f = L(a)+f
+            setattr(self, name, f)
         self.set_as_item(as_item)
 
     def set_as_item(self, as_item):
@@ -266,9 +273,10 @@ class Pipeline:
     def decode  (self, o): return compose_tfms(o, tfms=self.fs, is_enc=False, reverse=True, filt=self.filt)
     def __repr__(self): return f"Pipeline: {self.fs}"
     def __getitem__(self,i): return self.fs[i]
-    def decode_batch(self, b, max_n=10): return batch_to_samples(b, max_n=max_n).mapped(self.decode)
+    def decode_batch(self, b, max_n=10): return batch_to_samples(b, max_n=max_n).map(self.decode)
     def __setstate__(self,data): self.__dict__.update(data)
     def __getattr__(self,k): return gather_attrs(self, k, 'fs')
+    def __dir__(self): return super().__dir__() + gather_attr_names(self, 'fs')
 
     def show(self, o, ctx=None, **kwargs):
         for f in reversed(self.fs):

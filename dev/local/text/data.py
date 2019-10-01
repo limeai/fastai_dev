@@ -76,13 +76,14 @@ class LMDataLoader(TfmdDL):
         return txt[:-1],txt[1:]
 
     @classmethod
-    def dbunchify(cls, dsrc, bs=16, val_bs=None, shuffle_train=True, after_batch=None, **kwargs):
+    def dbunchify(cls, dsrc, lens=None, bs=16, val_bs=None, shuffle_train=True, after_batch=None, **kwargs):
         n = len(dsrc.filts)-1
         bss = [bs] + [2*bs]*n if val_bs is None else [bs] + [val_bs]*n
         shuffles = [shuffle_train] + [False]*n
         if after_batch is None: after_batch = Cuda()
-        return DataBunch(*[cls(dsrc.subset(i), bs=b, shuffle=s, drop_last=s, after_batch=after_batch, **kwargs)
-                           for i,(b,s) in enumerate(zip(bss, shuffles))])
+        lens = [None]*dsrc.n_subsets if lens is None else [L(lens, use_list=None)[f] for f in dsrc.filts]
+        return DataBunch(*[cls(dsrc.subset(i), lens=l, bs=b, shuffle=s, drop_last=s, after_batch=after_batch, **kwargs)
+                           for i,(b,s,l) in enumerate(zip(bss, shuffles, lens))])
 
 #Cell
 def pad_collate(samples, pad_idx=1, pad_first=False, backwards=False):
@@ -97,7 +98,32 @@ def pad_collate(samples, pad_idx=1, pad_first=False, backwards=False):
     return res, tensor(np.array([s[1] for s in samples]))
 
 #Cell
+def _default_sort(x): return len(x[0])
+
+@delegates(TfmdDL)
 class SortedDL(TfmdDL):
+    def __init__(self, dataset, sort_func=None, res=None, **kwargs):
+        super().__init__(dataset, **kwargs)
+        self.sort_func = _default_sort if sort_func is None else sort_func
+        self.res = [self.sort_func(self.do_item(i)) for i in range_of(self.dataset)] if res is None else res
+        self.idx_max = np.argmax(self.res)
+
     def get_idxs(self):
         idxs = super().get_idxs()
-        return sorted(idxs, key=lambda i: len(self.do_item(i)[0]), reverse=True)
+        if self.shuffle: return idxs
+        return sorted(idxs, key=lambda i: self.res[i], reverse=True)
+
+    def shuffle_fn(self,idxs):
+        idxs = np.random.permutation(len(self.dataset))
+        idx_max = np.extract(idxs==self.idx_max, idxs)[0]
+        idxs[0],idxs[idx_max] = idxs[idx_max],idxs[0]
+        sz = self.bs*50
+        chunks = [idxs[i:i+sz] for i in range(0, len(idxs), sz)]
+        chunks = [sorted(s, key=lambda i: self.res[i], reverse=True) for s in chunks]
+        sort_idx = np.concatenate(chunks)
+
+        sz = self.bs
+        batches = [sort_idx[i:i+sz] for i in range(0, len(sort_idx), sz)]
+        sort_idx = np.concatenate(np.random.permutation(batches[1:-1])) if len(batches) > 2 else np.array([],dtype=np.int)
+        sort_idx = np.concatenate((batches[0], sort_idx) if len(batches)==1 else (batches[0], sort_idx, batches[-1]))
+        return iter(sort_idx)
