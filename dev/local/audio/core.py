@@ -5,12 +5,10 @@ __all__ = ['ESC50_SAMPLE', 'audio_extensions', 'get_audio_files', 'AudioGetter',
            'RemoveType', 'remove_silence', 'apply_rules']
 
 #Cell
-from ..core import *
 from ..torch_basics import *
 from ..test import *
 from ..data.all import *
 from ..notebook.showdoc import *
-from ..callback.fp16 import *
 
 #Cell
 from ..torch_basics import *
@@ -53,7 +51,7 @@ def load_audio(fn, **kwargs):
     return signal, sample_rate
 
 #Cell
-class AudioSignal(TupleBase):
+class AudioSignal(Tuple):
     "Basic type for an audio signal"
     def show(self, ctx=None, **kwargs):
         return display(Audio(data=self.signal, rate=self.sample_rate))

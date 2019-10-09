@@ -8,5 +8,5 @@ from ..torch_basics import *
 from ..test import *
 from ..data.all import *
 from ..callback.fp16 import *
-#from local.audio.core import *
+from .core import *
 from ..notebook.showdoc import *
