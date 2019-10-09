@@ -8,7 +8,6 @@ from ..test import *
 from ..core import *
 from ..data.all import *
 from .core import *
-from ..notebook.showdoc import show_doc
 
 #Cell
 try: import cudf,nvcategory
@@ -88,4 +87,4 @@ from torch.utils.dlpack import from_dlpack
 
 @ReadTabBatch
 def encodes(self, to: TabularGPU):
-    return (from_dlpack(to.cats.to_dlpack()).long(),from_dlpack(to.conts.to_dlpack()).float()), from_dlpack(to.targ.to_dlpack()).long()
+    return from_dlpack(to.cats.to_dlpack()).long(),from_dlpack(to.conts.to_dlpack()).float(), from_dlpack(to.targ.to_dlpack()).long()

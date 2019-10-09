@@ -12,7 +12,6 @@ from .torch_basics import *
 from .test import *
 from .layers import *
 from .data.all import *
-from .notebook.showdoc import show_doc
 from .optimizer import *
 from .learner import *
 from .callback.progress import *
@@ -33,12 +32,13 @@ class AccumMetric(Metric):
         pred = learn.pred.argmax(dim=self.dim_argmax) if self.dim_argmax else learn.pred
         if self.sigmoid: pred = torch.sigmoid(pred)
         if self.thresh:  pred = (pred >= self.thresh)
-        pred,targ = flatten_check(pred, learn.yb)
-        self.preds.append(pred)
-        self.targs.append(targ)
+        pred,targ = flatten_check(pred, learn.y)
+        self.preds.append(to_detach(pred))
+        self.targs.append(to_detach(targ))
 
     @property
     def value(self):
+        if len(self.preds) == 0: return
         preds,targs = torch.cat(self.preds),torch.cat(self.targs)
         if self.to_np: preds,targs = preds.numpy(),targs.numpy()
         return self.func(targs, preds, **self.kwargs) if self.invert_args else self.func(preds, targs, **self.kwargs)
@@ -268,7 +268,7 @@ class Dice(Metric):
     def __init__(self, axis=1): self.axis = axis
     def reset(self): self.inter,self.union = 0,0
     def accumulate(self, learn):
-        pred,targ = flatten_check(learn.pred.argmax(dim=self.axis), learn.yb)
+        pred,targ = flatten_check(learn.pred.argmax(dim=self.axis), learn.y)
         self.inter += (pred*targ).float().sum().item()
         self.union += (pred+targ).float().sum().item()
 

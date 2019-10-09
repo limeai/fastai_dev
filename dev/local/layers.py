@@ -2,10 +2,11 @@
 
 __all__ = ['Lambda', 'PartialLambda', 'View', 'ResizeBatch', 'Flatten', 'Debugger', 'sigmoid_range', 'SigmoidRange',
            'AdaptiveConcatPool2d', 'pool_layer', 'PoolFlatten', 'NormType', 'BatchNorm', 'BatchNorm1dFlat', 'BnDropLin',
-           'init_default', 'ConvLayer', 'FlattenedLoss', 'CrossEntropyLossFlat', 'BCEWithLogitsLossFlat', 'BCELossFlat',
-           'MSELossFlat', 'trunc_normal_', 'Embedding', 'SelfAttention', 'PooledSelfAttention2d', 'icnr_init',
-           'PixelShuffle_ICNR', 'SequentialEx', 'MergeLayer', 'SimpleCNN', 'ResBlock', 'ParameterModule',
-           'children_and_parameters', 'TstModule', 'tst', 'children', 'flatten_model']
+           'init_default', 'ConvLayer', 'BaseLoss', 'CrossEntropyLossFlat', 'BCEWithLogitsLossFlat', 'BCELossFlat',
+           'MSELossFlat', 'LabelSmoothingCrossEntropy', 'trunc_normal_', 'Embedding', 'SelfAttention',
+           'PooledSelfAttention2d', 'icnr_init', 'PixelShuffle_ICNR', 'SequentialEx', 'MergeLayer', 'Cat', 'SimpleCNN',
+           'ResBlock', 'ParameterModule', 'children_and_parameters', 'TstModule', 'tst', 'children', 'flatten_model',
+           'NoneReduce', 'in_channels']
 
 #Cell
 from .torch_basics import *
@@ -155,10 +156,14 @@ class ConvLayer(nn.Sequential):
         super().__init__(*layers)
 
 #Cell
-class FlattenedLoss():
+@funcs_kwargs
+class BaseLoss():
     "Same as `loss_cls`, but flattens input and target."
-    def __init__(self, loss_cls, *args, axis=-1, floatify=False, is_2d=True, **kwargs):
-        self.func,self.axis,self.floatify,self.is_2d = loss_cls(*args,**kwargs),axis,floatify,is_2d
+    activation=decodes=noops
+    _methods = "activation decodes".split()
+    def __init__(self, loss_cls, *args, axis=-1, flatten=True, floatify=False, is_2d=True, **kwargs):
+        store_attr(self, "axis,flatten,floatify,is_2d")
+        self.func = loss_cls(*args,**kwargs)
         functools.update_wrapper(self, self.func)
 
     def __repr__(self): return f"FlattenedLoss of {self.func}"
@@ -171,28 +176,47 @@ class FlattenedLoss():
         inp  = inp .transpose(self.axis,-1).contiguous()
         targ = targ.transpose(self.axis,-1).contiguous()
         if self.floatify and targ.dtype!=torch.float16: targ = targ.float()
-        inp = inp.view(-1,inp.shape[-1]) if self.is_2d else inp.view(-1)
-        return self.func.__call__(inp, targ.view(-1), **kwargs)
+        if self.flatten: inp = inp.view(-1,inp.shape[-1]) if self.is_2d else inp.view(-1)
+        return self.func.__call__(inp, targ.view(-1) if self.flatten else targ, **kwargs)
 
 #Cell
 def CrossEntropyLossFlat(*args, axis=-1, **kwargs):
     "Same as `nn.CrossEntropyLoss`, but flattens input and target."
-    return FlattenedLoss(nn.CrossEntropyLoss, *args, axis=axis, **kwargs)
+    def _decodes(x): return x.argmax(dim=axis)
+    def _act(x): return F.softmax(x, dim=axis)
+    return BaseLoss(nn.CrossEntropyLoss, *args, axis=axis, activation=_act, decodes=_decodes, **kwargs)
 
 #Cell
-def BCEWithLogitsLossFlat(*args, axis=-1, floatify=True, **kwargs):
+def BCEWithLogitsLossFlat(*args, axis=-1, floatify=True, thresh=0.5, **kwargs):
     "Same as `nn.BCEWithLogitsLoss`, but flattens input and target."
-    return FlattenedLoss(nn.BCEWithLogitsLoss, *args, axis=axis, floatify=floatify, is_2d=False, **kwargs)
+    def _decodes(x): return x>thresh
+    return BaseLoss(nn.BCEWithLogitsLoss, *args, axis=axis, floatify=floatify, is_2d=False, activation=torch.sigmoid, decodes=_decodes, **kwargs)
 
 #Cell
 def BCELossFlat(*args, axis=-1, floatify=True, **kwargs):
     "Same as `nn.BCELoss`, but flattens input and target."
-    return FlattenedLoss(nn.BCELoss, *args, axis=axis, floatify=floatify, is_2d=False, **kwargs)
+    return BaseLoss(nn.BCELoss, *args, axis=axis, floatify=floatify, is_2d=False, **kwargs)
 
 #Cell
 def MSELossFlat(*args, axis=-1, floatify=True, **kwargs):
     "Same as `nn.MSELoss`, but flattens input and target."
-    return FlattenedLoss(nn.MSELoss, *args, axis=axis, floatify=floatify, is_2d=False, **kwargs)
+    return BaseLoss(nn.MSELoss, *args, axis=axis, floatify=floatify, is_2d=False, **kwargs)
+
+#Cell
+class LabelSmoothingCrossEntropy(Module):
+    def __init__(self, eps:float=0.1, reduction='mean'): self.eps,self.reduction = eps,reduction
+
+    def forward(self, output, target):
+        c = output.size()[-1]
+        log_preds = F.log_softmax(output, dim=-1)
+        if self.reduction=='sum': loss = -log_preds.sum()
+        else:
+            loss = -log_preds.sum(dim=-1)
+            if self.reduction=='mean':  loss = loss.mean()
+        return loss*self.eps/c + (1-self.eps) * F.nll_loss(log_preds, target, reduction=self.reduction)
+
+    def activation(self, out): return F.softmax(out, dim=-1)
+    def decodes(self, out):    return out.argmax(dim=-1)
 
 #Cell
 def trunc_normal_(x, mean=0., std=1.):
@@ -298,6 +322,14 @@ class MergeLayer(Module):
     def forward(self, x): return torch.cat([x,x.orig], dim=1) if self.dense else (x+x.orig)
 
 #Cell
+class Cat(nn.ModuleList):
+    "Concatenate layers outputs over a given dim"
+    def __init__(self, layers, dim=1):
+        self.dim=dim
+        super().__init__(layers)
+    def forward(self, x): return torch.cat([l(x) for l in self], dim=self.dim)
+
+#Cell
 class SimpleCNN(nn.Sequential):
     "Create a simple CNN with `filters`."
     def __init__(self, filters, kernel_szs=None, strides=None, bn=True):
@@ -312,6 +344,7 @@ class SimpleCNN(nn.Sequential):
 #Cell
 class ResBlock(nn.Module):
     "Resnet block from `ni` to `nh` with `stride`"
+    @delegates(ConvLayer.__init__)
     def __init__(self, expansion, ni, nh, stride=1, norm_type=NormType.Batch, **kwargs):
         super().__init__()
         norm2 = NormType.BatchZero if norm_type==NormType.Batch else norm_type
@@ -368,3 +401,25 @@ nn.Module.has_children = property(_has_children)
 def flatten_model(m):
     "Return the list of all submodules and parameters of `m`"
     return sum(map(flatten_model,children_and_parameters(m)),[]) if m.has_children else [m]
+
+#Cell
+class NoneReduce():
+    "A context manager to evaluate `loss_func` with none reduce."
+    def __init__(self, loss_func): self.loss_func,self.old_red = loss_func,None
+
+    def __enter__(self):
+        if hasattr(self.loss_func, 'reduction'):
+            self.old_red = self.loss_func.reduction
+            self.loss_func.reduction = 'none'
+            return self.loss_func
+        else: return partial(self.loss_func, reduction='none')
+
+    def __exit__(self, type, value, traceback):
+        if self.old_red is not None: self.loss_func.reduction = self.old_red
+
+#Cell
+def in_channels(m):
+    "Return the shape of the first weight layer in `m`."
+    for l in flatten_model(m):
+        if hasattr(l, 'weight'): return l.weight.shape[1]
+    raise Exception('No weight layer')

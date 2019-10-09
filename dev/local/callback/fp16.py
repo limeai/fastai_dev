@@ -7,13 +7,12 @@ from ..torch_basics import *
 from ..test import *
 from ..layers import *
 from ..data.all import *
-from ..notebook.showdoc import show_doc
 from ..optimizer import *
 from ..learner import *
 from .progress import *
 
 #Cell
-from ..utils.fp16_utils import convert_network, model_grads_to_master_grads, master_params_to_model_params
+from ..fp16_utils import convert_network, model_grads_to_master_grads, master_params_to_model_params
 
 #Cell
 from torch.nn.utils import parameters_to_vector
@@ -69,15 +68,14 @@ class MixedPrecision(Callback):
         self.loss_scale = max_loss_scale if dynamic else loss_scale
 
     def begin_fit(self):
+        if self.learn.opt is None: self.learn.create_opt()
         self.learn.model = convert_network(self.model, dtype=torch.float16)
         self.model_pgs,self.master_pgs = get_master(self.opt, self.flat_master)
         #Changes the optimizer so that the optimization step is done in FP32.
         self.learn.opt.param_groups = self.master_pgs
         if self.dynamic: self.count = 0
 
-    def begin_batch(self):
-        if self.xb.dtype not in [torch.int16, torch.int32, torch.int64]: self.learn.xb = self.xb.half()
-
+    def begin_batch(self): self.learn.xb = to_half(self.xb)
     def after_pred(self):  self.learn.pred = self.pred.float()
     def after_loss(self):
         if self.training: self.learn.loss *= self.loss_scale
@@ -122,4 +120,4 @@ class MixedPrecision(Callback):
 #Cell
 @delegates(MixedPrecision.__init__)
 @patch
-def to_fp16(self:Learner, **kwargs): self.add_cb(MixedPrecision(**kwargs))
+def to_fp16(self:Learner, **kwargs): return self.add_cb(MixedPrecision(**kwargs))

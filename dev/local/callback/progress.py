@@ -7,7 +7,6 @@ from ..torch_basics import *
 from ..test import *
 from ..layers import *
 from ..data.all import *
-from ..notebook.showdoc import show_doc
 from ..optimizer import *
 from ..learner import *
 
@@ -79,7 +78,7 @@ class ShowGraphCallback(Callback):
 
 #Cell
 class CSVLogger(Callback):
-    order=30 #Need to run after the recorder
+    run_after=Recorder
     "Log the results displayed in `learn.path/fname`"
     def __init__(self, fname='history.csv', append=False):
         self.fname,self.append = Path(fname),append
