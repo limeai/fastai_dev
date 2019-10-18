@@ -6,7 +6,6 @@ __all__ = ['default_show_batch', 'default_show_results', 'show_batch', 'show_res
 #Cell
 from ..torch_basics import *
 from ..test import *
-from ..transform import *
 from .load import *
 
 #Cell
@@ -42,8 +41,8 @@ class TfmdDL(DataLoader):
         if num_workers is None: num_workers = min(16, defaults.cpus)
         for nm in _batch_tfms:
             kwargs[nm] = Pipeline(kwargs.get(nm,None), as_item=(nm=='before_batch'))
-            kwargs[nm].setup(self)
         super().__init__(dataset, bs=bs, shuffle=shuffle, num_workers=num_workers, **kwargs)
+        for nm in _batch_tfms: kwargs[nm].setup(self)
 
     def _one_pass(self):
         its = self.after_batch(self.do_batch([self.do_item(0)]))
@@ -131,17 +130,19 @@ class FilteredBase:
         self.databunch = delegates(self._dl_type.__init__)(self.databunch)
         super().__init__(*args, **kwargs)
 
-    def _new(self, items, **kwargs): return super()._new(items, splits=self.splits, **kwargs)
-    def subset(self): raise NotImplemented
     @property
     def n_subsets(self): return len(self.splits)
+    def _new(self, items, **kwargs): return super()._new(items, splits=self.splits, **kwargs)
+    def subset(self): raise NotImplemented
 
-    def databunch(self, bs=16, val_bs=None, shuffle_train=True, n=None, **kwargs):
+    def databunch(self, bs=16, val_bs=None, shuffle_train=True, n=None, dl_type=None, dl_kwargs=None, **kwargs):
+        if dl_kwargs is None: dl_kwargs = [{}] * self.n_subsets
         ns = self.n_subsets-1
         bss = [bs] + [2*bs]*ns if val_bs is None else [bs] + [val_bs]*ns
         shuffles = [shuffle_train] + [False]*ns
-        dls = [self._dl_type(self.subset(i), bs=b, shuffle=s, drop_last=s, n=n if i==0 else None, **kwargs)
-               for i,(b,s) in enumerate(zip(bss, shuffles))]
+        if dl_type is None: dl_type = self._dl_type
+        dls = [dl_type(self.subset(i), bs=b, shuffle=s, drop_last=s, n=n if i==0 else None, **kwargs, **dk)
+               for i,(b,s,dk) in enumerate(zip(bss,shuffles,dl_kwargs))]
         return DataBunch(*dls)
 
 FilteredBase.train,FilteredBase.valid = add_props(lambda i,x: x.subset(i), 2)
@@ -152,7 +153,7 @@ class TfmdList(FilteredBase, L):
     _default='tfms'
     def __init__(self, items, tfms, use_list=None, do_setup=True, as_item=True, split_idx=None, train_setup=True, splits=None):
         super().__init__(items, use_list=use_list)
-        self.splits = L([slice(None)] if splits is None else splits).map(mask2idxs)
+        self.splits = L([slice(None),[]] if splits is None else splits).map(mask2idxs)
         if isinstance(tfms,TfmdList): tfms = tfms.tfms
         if isinstance(tfms,Pipeline): do_setup=False
         self.tfms = Pipeline(tfms, as_item=as_item, split_idx=split_idx)
@@ -209,6 +210,8 @@ class DataSource(FilteredBase):
     def splits(self): return self.tls[0].splits
     @property
     def split_idx(self): return self.tls[0].tfms.split_idx
+    @property
+    def items(self): return self.tls[0].items
 
     def show(self, o, ctx=None, **kwargs):
         for o_,tl in zip(o,self.tls): ctx = tl.show(o_, ctx=ctx, **kwargs)

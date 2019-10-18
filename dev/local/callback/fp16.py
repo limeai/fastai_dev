@@ -3,12 +3,8 @@
 __all__ = ['get_master', 'to_master_grads', 'to_model_params', 'test_overflow', 'grad_overflow', 'MixedPrecision']
 
 #Cell
-from ..torch_basics import *
 from ..test import *
-from ..layers import *
-from ..data.all import *
-from ..optimizer import *
-from ..learner import *
+from ..basics import *
 from .progress import *
 
 #Cell

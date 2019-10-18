@@ -4,7 +4,7 @@ __all__ = ['read_nb', 'check_re', 'is_export', 'find_default_export', 'export_na
            'get_name', 'qual_name', 'source_nb', 'script2notebook', 'diff_nb_script']
 
 #Cell
-from ..imports import *
+from ..core.imports import *
 from .core import *
 import nbformat,inspect
 from nbformat.sign import NotebookNotary
@@ -102,6 +102,18 @@ _re_patch_func = re.compile(r"""
 """, re.VERBOSE)
 
 #Cell
+_re_typedispatch_func = re.compile(r"""
+# Catches any function decorated with @typedispatch
+(@typedispatch  # At any place in the cell, catch a group with something that begins with @patch
+\s*def          # Any number of whitespace (including a new line probably) followed by def
+\s+             # One whitespace or more
+[^\(]*          # Anything but whitespace or an opening parenthesis (name of the function)
+\s*\(           # Any number of whitespace followed by an opening parenthesis
+[^\)]*          # Any number of character different of )
+\)\s*:)         # A closing parenthesis followed by whitespace and :
+""", re.VERBOSE)
+
+#Cell
 _re_class_func_def = re.compile(r"""
 # Catches any 0-indented function or class definition with its name in group 1
 ^              # Beginning of a line (since re.MULTILINE is passed)
@@ -134,6 +146,7 @@ def export_names(code, func_only=False):
         if cls is not None: return f"def {cls}.{nm}():"
         return '\n'.join([f"def {c}.{nm}():" for c in re.split(', *', t[1:-1])])
 
+    code = _re_typedispatch_func.sub('', code)
     code = _re_patch_func.sub(_f, code)
     names = _re_class_func_def.findall(code)
     if not func_only: names += _re_obj_def.findall(code)
@@ -226,7 +239,7 @@ def _notebook2script(fname, silent=False, to_pkl=False):
     index = _get_index()
     exports = [is_export(c, default) for c in nb['cells']]
     cells = [(i,c,e) for i,(c,e) in enumerate(zip(nb['cells'],exports)) if e is not None]
-    for (i,c,e) in cells:
+    for i,c,e in cells:
         fname_out = Path.cwd()/'local'/f'{e}.py'
         orig = ('#C' if e==default else f'#Comes from {fname.name}, c') + 'ell\n'
         code = '\n\n' + orig + '\n'.join(_deal_import(c['source'].split('\n')[1:], fname_out))
@@ -303,7 +316,9 @@ _re_cell = re.compile(r'^#Cell|^#Comes from\s+(\S+), cell')
 #Cell
 def _split(code):
     lines = code.split('\n')
-    default_nb = _re_default_nb.search(lines[0]).groups()[0]
+    default_nb = _re_default_nb.search(lines[0])
+    if not default_nb: set_trace()
+    default_nb = default_nb.groups()[0]
     s,res = 1,[]
     while _re_cell.search(lines[s]) is None: s += 1
     e = s+1
@@ -322,6 +337,9 @@ def _relimport2name(name, mod_name):
     if mod_name.endswith('.py'): mod_name = mod_name[:-3]
     mods = mod_name.split(os.path.sep)
     mods = mods[mods.index('local'):]
+    if name=='.':
+        print("###",'.'.join(mods[:-1]))
+        return '.'.join(mods[:-1])
     i = 0
     while name[i] == '.': i += 1
     return '.'.join(mods[:-i] + [name[i:]])
@@ -351,10 +369,11 @@ def _update_pkl(fname, cell):
 def _script2notebook(fname, dic, silent=False):
     "Put the content of `fname` back in the notebooks it came from."
     if os.environ.get('IN_TEST',0): return  # don't export if running tests
+    if not silent: print(f"Converting {fname}.")
     fname = Path(fname)
     with open(fname) as f: code = f.read()
     splits = _split(code)
-    assert len(splits) == len(dic[fname]), f"Exported file from notebooks should have {len(dic[fname])} cells but has {len(splits)}."
+    assert len(splits)==len(dic[fname]), f"Exported file from notebooks should have {len(dic[fname])} cells but has {len(splits)}."
     assert np.all([c1[0]==c2[1]] for c1,c2 in zip(splits, dic[fname]))
     splits = [(c2[0],c1[0],c1[1]) for c1,c2 in zip(splits, dic[fname])]
     nb_fnames = {s[1] for s in splits}
@@ -367,10 +386,9 @@ def _script2notebook(fname, dic, silent=False):
                 nb['cells'][i]['source'] = l + '\n' + c
         NotebookNotary().sign(nb)
         nbformat.write(nb, nb_fname, version=4)
-    if not silent: print(f"Converted {fname}.")
 
 #Cell
-_manual_mods = ['__init__.py imports.py torch_imports.py all.py torch_basics.py fp16_utils.py test_utils.py basics.py'.split()]
+_manual_mods = 'version.py __init__.py imports.py torch_imports.py all.py torch_basics.py fp16_utils.py test_utils.py basics.py'.split()
 
 #Cell
 def script2notebook(folder='local', silent=False):

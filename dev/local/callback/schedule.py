@@ -4,12 +4,8 @@ __all__ = ['annealer', 'SchedLin', 'SchedCos', 'SchedNo', 'SchedExp', 'SchedPoly
            'ParamScheduler', 'LRFinder']
 
 #Cell
-from ..torch_basics import *
 from ..test import *
-from ..layers import *
-from ..data.all import *
-from ..optimizer import *
-from ..learner import *
+from ..basics import *
 
 #Cell
 def annealer(f):

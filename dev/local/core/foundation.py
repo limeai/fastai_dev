@@ -3,11 +3,10 @@
 __all__ = ['defaults', 'FixSigMeta', 'PrePostInitMeta', 'NewChkMeta', 'BypassNewMeta', 'copy_func', 'patch_to', 'patch',
            'patch_property', 'use_kwargs', 'delegates', 'funcs_kwargs', 'method', 'add_docs', 'docs', 'custom_dir',
            'arg0', 'arg1', 'arg2', 'arg3', 'arg4', 'bind', 'GetAttr', 'delegate_attr', 'coll_repr', 'mask2idxs',
-           'listable_types', 'CollBase', 'cycle', 'zip_cycle', 'is_indexer', 'L', 'camel2snake', 'display_df',
-           'PrettyString']
+           'listable_types', 'CollBase', 'cycle', 'zip_cycle', 'is_indexer', 'negate_func', 'L']
 
 #Cell
-from .test import *
+from ..test import *
 from .imports import *
 
 #Cell
@@ -272,6 +271,12 @@ def is_indexer(idx):
     return isinstance(idx,int) or not getattr(idx,'ndim',1)
 
 #Cell
+def negate_func(f):
+    "Create new function that negates result of `f`"
+    def _f(*args, **kwargs): return not f(*args, **kwargs)
+    return _f
+
+#Cell
 class L(CollBase, GetAttr, metaclass=NewChkMeta):
     "Behaves like a list of `items` but can also index with list of indices or masks"
     _default='items'
@@ -334,13 +339,21 @@ class L(CollBase, GetAttr, metaclass=NewChkMeta):
              else f.__getitem__)
         return self._new(map(g, self))
 
+    def filter(self, f, negate=False, **kwargs):
+        if kwargs: f = partial(f,**kwargs)
+        if negate: f = negate_func(f)
+        return self._new(filter(f, self))
+
     def unique(self): return L(dict.fromkeys(self).keys())
     def enumerate(self): return L(enumerate(self))
     def val2idx(self): return {v:k for k,v in self.enumerate()}
-    def itemgot(self, idx): return self.map(itemgetter(idx))
+    def itemgot(self, *idxs):
+        x = self
+        for idx in idxs: x = x.map(itemgetter(idx))
+        return x
+
     def attrgot(self, k, default=None): return self.map(lambda o:getattr(o,k,default))
     def cycle(self): return cycle(self)
-    def filter(self, f, *args, **kwargs): return self._new(filter(partial(f,*args,**kwargs), self))
     def map_dict(self, f=noop, *args, **kwargs): return {k:f(k, *args,**kwargs) for k in self}
     def starmap(self, f, *args, **kwargs): return self._new(itertools.starmap(partial(f,*args,**kwargs), self))
     def zip(self, cycled=False): return self._new((zip_cycle if cycled else zip)(*self))
@@ -375,25 +388,3 @@ add_docs(L,
          map_zipwith="Combine `zipwith` and `starmap`",
          concat="Concatenate all elements of list",
          shuffle="Same as `random.shuffle`, but not inplace")
-
-#Comes from 01a_utils.ipynb, cell
-_camel_re1 = re.compile('(.)([A-Z][a-z]+)')
-_camel_re2 = re.compile('([a-z0-9])([A-Z])')
-
-def camel2snake(name):
-    s1   = re.sub(_camel_re1, r'\1_\2', name)
-    return re.sub(_camel_re2, r'\1_\2', s1).lower()
-
-test_eq(camel2snake('ClassAreCamel'), 'class_are_camel')
-
-#Comes from 01a_utils.ipynb, cell
-def display_df(df):
-    "Display `df` in a notebook or defaults to print"
-    try: from IPython.display import display, HTML
-    except: return print(df)
-    display(HTML(df.to_html()))
-
-#Comes from 15_callback_hook.ipynb, cell
-class PrettyString(str):
-    "Little hack to get strings to show properly in Jupyter."
-    def __repr__(self): return self

@@ -6,8 +6,8 @@ __all__ = ['remove_widget_state', 'hide_cells', 'clean_exports', 'treat_backtick
            'convert_nb', 'convert_all', 'convert_post']
 
 #Cell
-from ..imports import *
-from ..core import compose
+from ..core.imports import *
+from ..utils import compose
 from ..test import *
 from .export import *
 from .showdoc import *
