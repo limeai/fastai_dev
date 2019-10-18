@@ -6,9 +6,9 @@ __all__ = ['ifnone', 'get_class', 'mk_class', 'wrap_class', 'store_attr', 'attrd
            'ne', 'add', 'sub', 'mul', 'truediv', 'Inf', 'true', 'stop', 'gen', 'chunked', 'retain_type', 'retain_types',
            'show_title', 'ShowTitle', 'Int', 'Float', 'Str', 'num_methods', 'rnum_methods', 'inum_methods', 'Tuple',
            'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'mapped', 'instantiate', 'Self', 'Self', 'bunzip',
-           'join_path_file', 'sort_by_run', 'subplots', 'show_image', 'show_titled_image', 'ArrayBase',
+           'join_path_file', 'sort_by_run', 'subplots', 'show_image', 'show_titled_image', 'show_images', 'ArrayBase',
            'ArrayImageBase', 'ArrayImage', 'ArrayImageBW', 'ArrayMask', 'PrettyString', 'display_df', 'round_multiple',
-           'even_mults', 'num_cpus', 'add_props']
+           'even_mults', 'num_cpus', 'add_props', 'set_num_threads']
 
 #Cell
 from ..test import *
@@ -542,6 +542,15 @@ def show_titled_image(o, **kwargs):
     show_image(o[0], title=str(o[1]), **kwargs)
 
 #Cell
+@delegates(subplots)
+def show_images(ims, rows=1, titles=None, **kwargs):
+    "Show all images `ims` as subplots with `rows` using `titles`"
+    cols = int(math.ceil(len(ims)/rows))
+    if titles is None: titles = [None]*len(ims)
+    axs = subplots(rows,cols,**kwargs)[1].flat
+    for im,t,ax in zip(ims, titles, axs): show_image(im, ax=ax, title=t)
+
+#Cell
 class ArrayBase(ndarray):
     def __new__(cls, x, *args, **kwargs):
         if isinstance(x,tuple): super().__new__(cls, x, *args, **kwargs)
@@ -603,3 +612,13 @@ defaults.cpus = num_cpus()
 def add_props(f, n=2):
     "Create properties passing each of `range(n)` to f"
     return (property(partial(f,i)) for i in range(n))
+
+#Cell
+def set_num_threads(nt):
+    "Get numpy (and others) to use `nt` threads"
+    mkl.set_num_threads(nt)
+    nt = str(nt)
+    os.environ['OPENBLAS_NUM_THREADS'] = nt
+    os.environ['NUMEXPR_NUM_THREADS'] = nt
+    os.environ['OMP_NUM_THREADS'] = nt
+    os.environ['MKL_NUM_THREADS'] = nt
