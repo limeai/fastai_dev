@@ -135,7 +135,7 @@ def load_model(file, model, opt, with_opt=None, device=None, strict=True):
 class Learner():
     def __init__(self, dbunch, model, loss_func=None, opt_func=SGD, lr=defaults.lr, splitter=trainable_params, cbs=None,
                  cb_funcs=None, metrics=None, path=None, model_dir='models', wd_bn_bias=False, train_bn=True):
-        store_attr(self, "dbunch,model,opt_func,lr,splitter,model_dir,wd_bn_bias,train_bn")
+        store_attr(self, "dbunch,model,opt_func,lr,splitter,model_dir,wd_bn_bias,train_bn,metrics")
         self.training,self.logger,self.opt,self.cbs = False,print,None,L()
         #TODO: infer loss_func from data
         if loss_func is None:
@@ -143,10 +143,14 @@ class Learner():
             assert loss_func is not None, "Could not infer loss function from the data, please pass a loss function."
         self.loss_func = loss_func
         self.path = path if path is not None else getattr(dbunch, 'path', Path('.'))
-        self.metrics = L(metrics).map(mk_metric)
         self.add_cbs(cbf() for cbf in L(defaults.callbacks)+L(cb_funcs))
         self.add_cbs(cbs)
         self.model.to(self.dbunch.device)
+
+    @property
+    def metrics(self): return self._metrics
+    @metrics.setter
+    def metrics(self,v): self._metrics = L(v).map(mk_metric)
 
     def add_cbs(self, cbs): L(cbs).map(self.add_cb)
     def remove_cbs(self, cbs): L(cbs).map(self.remove_cb)
@@ -251,7 +255,7 @@ class Learner():
             self(_after_epoch)
         return self.recorder.values[-1]
 
-    def get_preds(self, ds_idx=1, dl=None, with_input=False, with_loss=False, decoded=False, act=None):
+    def get_preds(self, ds_idx=1, dl=None, with_input=False, with_loss=False, with_decoded=False, act=None):
         self.epoch,self.n_epoch,self.loss = 0,1,tensor(0.)
         cb = GatherPredsCallback(with_input=with_input, with_loss=with_loss)
         with self.no_logging(), self.added_cbs(cb), self.loss_not_reduced():
@@ -260,14 +264,14 @@ class Learner():
             self(_after_epoch)
             if act is None: act = getattr(self.loss_func, 'activation', noop)
             preds = act(torch.cat(cb.preds))
-            if decoded: preds = getattr(sellf.loss_func, 'decodes', noop)(preds)
             res = (preds, detuplify(tuple(torch.cat(o) for o in zip(*cb.targets))))
+            if with_decoded: res = res + (getattr(self.loss_func, 'decodes', noop)(preds),)
             if with_input: res = (tuple(torch.cat(o) for o in zip(*cb.inputs)),) + res
             if with_loss:  res = res + (torch.cat(cb.losses),)
             return res
 
-    def predict(self, item):
-        dl = test_dl(self.dbunch, [item])
+    def predict(self, item, rm_type_tfms=0):
+        dl = test_dl(self.dbunch, [item], rm_type_tfms=rm_type_tfms)
         inp,preds,_ = self.get_preds(dl=dl, with_input=True)
         dec_preds = getattr(self.loss_func, 'decodes', noop)(preds)
         i = getattr(self.dbunch, 'n_inp', -1)
@@ -421,7 +425,7 @@ class Recorder(Callback):
 
     def begin_fit(self):
         "Prepare state for training"
-        self.lrs,self.losses,self.values = [],[],[]
+        self.lrs,self.iters,self.losses,self.values = [],[],[],[]
         names = self._valid_mets.attrgot('name')
         if self.train_metrics: names = names.map('train_{}') + names.map('valid_{}')
         else:                  names = L('train_loss', 'valid_loss') + names[1:]
@@ -432,7 +436,7 @@ class Recorder(Callback):
     def after_batch(self):
         "Update all metrics and records lr and smooth loss in training"
         if len(self.yb) == 0: return
-        mets = L(self.smooth_loss) + (self._train_mets if self.training else self._valid_mets)
+        mets = self._train_mets if self.training else self._valid_mets
         for met in mets: met.accumulate(self.learn)
         if not self.training: return
         self.lrs.append(self.opt.hypers[-1]['lr'])
@@ -445,7 +449,7 @@ class Recorder(Callback):
         if self.add_time: self.start_epoch = time.time()
         self.log = L(getattr(self, 'epoch', 0))
 
-    def begin_train   (self): self._train_mets.map(Self.reset())
+    def begin_train   (self): self._train_mets[1:].map(Self.reset())
     def begin_validate(self): self._valid_mets.map(Self.reset())
     def after_train   (self): self.log += self._train_mets.map(_maybe_item)
     def after_validate(self): self.log += self._valid_mets.map(_maybe_item)
@@ -457,18 +461,23 @@ class Recorder(Callback):
         self.values.append(self.log[1:].copy())
         if self.add_time: self.log.append(format_time(time.time() - self.start_epoch))
         self.logger(self.log)
+        self.iters.append(self.smooth_loss.count)
 
     @property
     def _train_mets(self):
         if getattr(self, 'cancel_train', False): return L()
-        return L(self.loss) + (self.metrics if self.train_metrics else L())
+        return L(self.smooth_loss) + (self.metrics if self.train_metrics else L())
 
     @property
     def _valid_mets(self):
         if getattr(self, 'cancel_valid', False): return L()
         return L(self.loss) + self.metrics
 
-    def plot_loss(self, skip_start=5): plt.plot(self.losses[skip_start:])
+    def plot_loss(self, skip_start=5, with_valid=True):
+        plt.plot(self.losses[skip_start:], label='train')
+        if with_valid:
+            plt.plot(self.iters, L(self.values).itemgot(0), label='valid')
+            plt.legend()
 
 #Cell
 add_docs(Recorder,

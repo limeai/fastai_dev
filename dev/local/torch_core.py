@@ -2,11 +2,11 @@
 
 __all__ = ['progress_bar', 'master_bar', 'tensor', 'set_seed', 'unsqueeze', 'unsqueeze_', 'apply', 'to_detach',
            'to_half', 'to_float', 'default_device', 'to_device', 'to_cpu', 'to_np', 'TensorBase', 'TensorCategory',
-           'TensorImageBase', 'TensorImage', 'TensorImageBW', 'TensorMask', 'concat', 'Chunks', 'one_param',
-           'item_find', 'find_device', 'find_bs', 'Module', 'get_model', 'one_hot', 'one_hot_decode', 'params',
-           'trainable_params', 'bn_types', 'bn_bias_params', 'batch_to_samples', 'make_cross_image', 'show_image_batch',
-           'requires_grad', 'init_default', 'cond_init', 'apply_leaf', 'apply_init', 'ProcessPoolExecutor', 'parallel',
-           'run_procs', 'parallel_gen', 'flatten_check']
+           'TensorMultiCategory', 'TensorImageBase', 'TensorImage', 'TensorImageBW', 'TensorMask', 'concat', 'Chunks',
+           'one_param', 'item_find', 'find_device', 'find_bs', 'Module', 'get_model', 'one_hot', 'one_hot_decode',
+           'params', 'trainable_params', 'bn_types', 'bn_bias_params', 'batch_to_samples', 'logit', 'make_cross_image',
+           'show_image_batch', 'requires_grad', 'init_default', 'cond_init', 'apply_leaf', 'apply_init',
+           'set_num_threads', 'ProcessPoolExecutor', 'parallel', 'run_procs', 'parallel_gen', 'flatten_check']
 
 #Cell
 from .test import *
@@ -23,6 +23,11 @@ def __array_eq__(self:Tensor,b):
     return torch.equal(self,b) if self.dim() else self==b
 
 #Cell
+def _array2tensor(x):
+    if x.dtype==np.uint16: x = x.astype(np.float32)
+    return torch.from_numpy(x)
+
+#Cell
 def tensor(x, *rest, **kwargs):
     "Like `torch.as_tensor`, but handle lists too, and can pass multiple vector elements directly."
     if len(rest): x = (x,)+rest
@@ -30,16 +35,11 @@ def tensor(x, *rest, **kwargs):
     # if isinstance(x, (tuple,list)) and len(x)==0: return tensor(0)
     res = (x if isinstance(x, Tensor)
            else torch.tensor(x, **kwargs) if isinstance(x, (tuple,list))
-           else torch.from_numpy(x) if isinstance(x, ndarray)
+           else _array2tensor(x) if isinstance(x, ndarray)
            else as_tensor(x.values, **kwargs) if isinstance(x, (pd.Series, pd.DataFrame))
            else as_tensor(x, **kwargs) if hasattr(x, '__array__') or is_iter(x)
-           else None)
-    if res is None:
-        res = as_tensor(array(x), **kwargs)
-        if res.dtype is torch.float64: return res.float()
-    if res.dtype is torch.int32:
-        warn('Tensor is int32: upgrading to int64; for better performance use int64 input')
-        return res.long()
+           else _array2tensor(array(x), **kwargs))
+    if res.dtype is torch.float64: return res.float()
     return res
 
 #Cell
@@ -138,9 +138,8 @@ class TensorBase(Tensor):
         return (f, args + (self.requires_grad, OrderedDict()))
 
     def gi(self, i):
-        cls = self.__class__
         res = self[i]
-        return cls(res) if isinstance(res,Tensor) else res
+        return type(self)(res) if isinstance(res,Tensor) else res
 
 #Cell
 def _patch_tb():
@@ -168,6 +167,9 @@ _patch_tb()
 
 #Cell
 class TensorCategory(TensorBase): pass
+
+#Cell
+class TensorMultiCategory(TensorCategory): pass
 
 #Cell
 class TensorImageBase(TensorBase):
@@ -280,7 +282,8 @@ def get_model(model):
 def one_hot(x, c):
     "One-hot encode `x` with `c` classes."
     res = torch.zeros(c, dtype=torch.uint8)
-    res[L(x, use_list=None)] = 1.
+    if isinstance(x, Tensor) and x.numel()>0: res[x] = 1.
+    else: res[list(L(x, use_list=None))] = 1.
     return res
 
 #Cell
@@ -325,6 +328,12 @@ def interp_1d(x:Tensor, xp, fp):
     locs = (x[:,None]>=xp[None,:]).long().sum(1)-1
     locs = locs.clamp(0,len(slopes)-1)
     return slopes[locs]*x + incx[locs]
+
+#Cell
+def logit(x):
+    "Logit of `x`, clamped to avoid inf."
+    x = x.clamp(1e-7, 1-1e-7)
+    return -(1/x-1).log()
 
 #Cell
 def make_cross_image(bw=True):
@@ -381,6 +390,15 @@ def apply_init(m, func=nn.init.kaiming_normal_):
 
 #Cell
 from multiprocessing import Process, Queue
+
+#Cell
+def set_num_threads(nt):
+    "Get numpy (and others) to use `nt` threads"
+    try: import mkl; mkl.set_num_threads(nt)
+    except: pass
+    torch.set_num_threads(1)
+    for o in ['OPENBLAS_NUM_THREADS','NUMEXPR_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS']:
+        os.environ[o] = str(nt)
 
 #Cell
 @delegates(concurrent.futures.ProcessPoolExecutor)
