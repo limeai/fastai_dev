@@ -3,7 +3,7 @@
 __all__ = ['get_files', 'FileGetter', 'image_extensions', 'get_image_files', 'ImageGetter', 'RandomSplitter',
            'GrandparentSplitter', 'parent_label', 'RegexLabeller', 'CategoryMap', 'Categorize', 'Category',
            'MultiCategorize', 'MultiCategory', 'OneHotEncode', 'EncodedMultiCategorize', 'EncodedMultiCategory',
-           'get_c', 'ToTensor', 'Cuda', 'ByteToFloatTensor', 'broadcast_vec', 'Normalize']
+           'get_c', 'ToTensor', 'Cuda', 'IntToFloatTensor', 'broadcast_vec', 'Normalize']
 
 #Cell
 from ..torch_basics import *
@@ -81,7 +81,7 @@ def GrandparentSplitter(train_name='train', valid_name='valid'):
 #Cell
 def parent_label(o, **kwargs):
     "Label `item` with the parent folder name."
-    return o.parent.name if isinstance(o, Path) else o.split(os.path.sep)[-2]
+    return Path(o).parent.name
 
 #Cell
 def RegexLabeller(pat):
@@ -131,15 +131,18 @@ class Category(str, ShowTitle):
 class MultiCategorize(Categorize):
     "Reversible transform of multi-category strings to `vocab` id"
     loss_func,order=BCEWithLogitsLossFlat(),1
+    def __init__(self, vocab=None, add_na=False):
+        self.add_na = add_na
+        self.vocab = None if vocab is None else CategoryMap(vocab, add_na=add_na)
+
     def setups(self, dsrc):
         if not dsrc: return
         if self.vocab is None:
             vals = set()
             for b in dsrc: vals = vals.union(set(b))
-            self.vocab = CategoryMap(list(vals))
-        setattr(dsrc, 'vocab', self.vocab)
+            self.vocab = CategoryMap(list(vals), add_na=self.add_na)
 
-    def encodes(self, o): return [self.vocab.o2i  [o_] for o_ in o]
+    def encodes(self, o): return TensorMultiCategory([self.vocab.o2i  [o_] for o_ in o])
     def decodes(self, o): return MultiCategory ([self.vocab[o_] for o_ in o])
 
 #Cell
@@ -158,8 +161,10 @@ class OneHotEncode(Transform):
         if self.c is None: self.c = len(L(getattr(dsrc, 'vocab', None)))
         if not self.c: warn("Couldn't infer the number of classes, please pass a value for `c` at init")
 
-    def encodes(self, o): return TensorCategory(one_hot(o, self.c).bool())
+    def encodes(self, o): return TensorMultiCategory(one_hot(o, self.c).bool())
     def decodes(self, o): return one_hot_decode(o, None)
+
+MultiCategory.default_type_tfms = OneHotEncode
 
 #Cell
 class EncodedMultiCategorize(Categorize):
@@ -202,15 +207,15 @@ class Cuda(Transform):
     _docs=dict(encodes="Move batch to `device`", decodes="Return batch to CPU")
 
 #Cell
-class ByteToFloatTensor(Transform):
+class IntToFloatTensor(Transform):
     "Transform image to float tensor, optionally dividing by 255 (e.g. for images)."
     order = 20 #Need to run after CUDA if on the GPU
-    def __init__(self, div=True, div_mask=False, split_idx=None, as_item=True):
+    def __init__(self, div=255., div_mask=1, split_idx=None, as_item=True):
         super().__init__(split_idx=split_idx,as_item=as_item)
         self.div,self.div_mask = div,div_mask
 
-    def encodes(self, o:TensorImage): return o.float().div_(255.) if self.div else o.float()
-    def encodes(self, o:TensorMask ): return o.div_(255.).long() if self.div_mask else o.long()
+    def encodes(self, o:TensorImage): return o.float().div_(self.div)
+    def encodes(self, o:TensorMask ): return o.div_(self.div_mask).long()
     def decodes(self, o:TensorImage): return o.clamp(0., 1.) if self.div else o
 
 #Cell

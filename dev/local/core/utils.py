@@ -3,12 +3,12 @@
 __all__ = ['ifnone', 'get_class', 'mk_class', 'wrap_class', 'store_attr', 'attrdict', 'properties', 'camel2snake',
            'class2attr', 'hasattrs', 'tuplify', 'detuplify', 'replicate', 'uniqueify', 'setify', 'merge', 'is_listy',
            'range_of', 'groupby', 'first', 'shufflish', 'IterLen', 'ReindexCollection', 'lt', 'gt', 'le', 'ge', 'eq',
-           'ne', 'add', 'sub', 'mul', 'truediv', 'Inf', 'true', 'stop', 'gen', 'chunked', 'retain_type', 'retain_types',
-           'show_title', 'ShowTitle', 'Int', 'Float', 'Str', 'num_methods', 'rnum_methods', 'inum_methods', 'Tuple',
-           'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'mapped', 'instantiate', 'Self', 'Self', 'bunzip',
-           'join_path_file', 'sort_by_run', 'subplots', 'show_image', 'show_titled_image', 'ArrayBase',
-           'ArrayImageBase', 'ArrayImage', 'ArrayImageBW', 'ArrayMask', 'PrettyString', 'display_df', 'round_multiple',
-           'even_mults', 'num_cpus', 'add_props']
+           'ne', 'add', 'sub', 'mul', 'truediv', 'is_', 'is_not', 'Inf', 'true', 'stop', 'gen', 'chunked',
+           'retain_type', 'retain_types', 'show_title', 'ShowTitle', 'Int', 'Float', 'Str', 'num_methods',
+           'rnum_methods', 'inum_methods', 'Tuple', 'TupleTitled', 'trace', 'compose', 'maps', 'partialler', 'mapped',
+           'instantiate', 'Self', 'Self', 'bunzip', 'join_path_file', 'sort_by_run', 'subplots', 'show_image',
+           'show_titled_image', 'show_images', 'ArrayBase', 'ArrayImageBase', 'ArrayImage', 'ArrayImageBW', 'ArrayMask',
+           'PrettyString', 'display_df', 'round_multiple', 'even_mults', 'num_cpus', 'add_props']
 
 #Cell
 from ..test import *
@@ -182,19 +182,19 @@ class ReindexCollection(GetAttr, IterLen):
                 cache_clear="Clear LRU cache")
 
 #Cell
-def _oper(op,a,b=None): return (lambda o:op(o,a)) if b is None else op(a,b)
+def _oper(op,a,b=np.nan): return (lambda o:op(o,a)) if b!=b else op(a,b)
 
 def _mk_op(nm, mod=None):
     "Create an operator using `oper` and add to the caller's module"
     if mod is None: mod = inspect.currentframe().f_back.f_locals
     op = getattr(operator,nm)
-    def _inner(a,b=None): return _oper(op, a,b)
+    def _inner(a,b=np.nan): return _oper(op, a,b)
     _inner.__name__ = _inner.__qualname__ = nm
     _inner.__doc__ = f'Same as `operator.{nm}`, or returns partial if 1 arg'
     mod[nm] = _inner
 
 #Cell
-for op in 'lt gt le ge eq ne add sub mul truediv'.split(): _mk_op(op)
+for op in ['lt','gt','le','ge','eq','ne','add','sub','mul','truediv','is_','is_not']: _mk_op(op)
 
 #Cell
 class _InfMeta(type):
@@ -540,6 +540,15 @@ def show_image(im, ax=None, figsize=None, title=None, ctx=None, **kwargs):
 def show_titled_image(o, **kwargs):
     "Call `show_image` destructuring `o` to `(img,title)`"
     show_image(o[0], title=str(o[1]), **kwargs)
+
+#Cell
+@delegates(subplots)
+def show_images(ims, rows=1, titles=None, **kwargs):
+    "Show all images `ims` as subplots with `rows` using `titles`"
+    cols = int(math.ceil(len(ims)/rows))
+    if titles is None: titles = [None]*len(ims)
+    axs = subplots(rows,cols,**kwargs)[1].flat
+    for im,t,ax in zip(ims, titles, axs): show_image(im, ax=ax, title=t)
 
 #Cell
 class ArrayBase(ndarray):

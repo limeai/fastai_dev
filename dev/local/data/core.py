@@ -11,14 +11,14 @@ from .load import *
 #Cell
 def default_show_batch(x, y, its, ctxs=None, max_n=10, **kwargs):
     if ctxs is None: ctxs = Inf.nones
-    for i in range(1 if y is None else 2):
+    for i in range(len(its[0])):
         ctxs = [b.show(ctx=c, **kwargs) for b,c,_ in zip(its.itemgot(i),ctxs,range(max_n))]
     return ctxs
 
 #Cell
 def default_show_results(x, y, its, ctxs=None, max_n=10, **kwargs):
     if ctxs is None: ctxs = Inf.nones
-    for i in range(3):
+    for i in range(len(its[0])):
         ctxs = [b.show(ctx=c, **kwargs) for b,c,_ in zip(its.itemgot(i),ctxs,range(max_n))]
     return ctxs
 
@@ -204,7 +204,7 @@ class DataSource(FilteredBase):
     def __iter__(self): return (self[i] for i in range(len(self)))
     def __repr__(self): return coll_repr(self)
     def decode(self, o, full=True): return tuple(tl.decode(o_, full=full) for o_,tl in zip(o,tuplify(self.tls, match=o)))
-    def subset(self, i): return type(self)(tls=L(tl.subset(i) for tl in self.tls))
+    def subset(self, i): return type(self)(tls=L(tl.subset(i) for tl in self.tls), n_inp=self.n_inp)
     def _new(self, items, *args, **kwargs): return super()._new(items, tfms=self.tfms, do_setup=False, **kwargs)
     @property
     def splits(self): return self.tls[0].splits
@@ -224,13 +224,16 @@ class DataSource(FilteredBase):
         subset="New `DataSource` that only includes subset `i`")
 
 #Cell
-def test_set(dsrc, test_items):
+def test_set(dsrc, test_items, rm_tfms=0):
     "Create a test set from `test_items` using validation transforms of `dsrc`"
     test_tls = [tl._new(test_items, split_idx=1) for tl in dsrc.tls[:dsrc.n_inp]]
+    rm_tfms = tuplify(rm_tfms, match=test_tls)
+    for i,j in enumerate(rm_tfms): test_tls[i].tfms.fs = test_tls[i].tfms.fs[j:]
     return DataSource(tls=test_tls)
 
 #Cell
-def test_dl(dbunch, test_items):
+@delegates(TfmdDL.__init__)
+def test_dl(dbunch, test_items, rm_type_tfms=0, **kwargs):
     "Create a test dataloader from `test_items` using validation transforms of `dbunch`"
-    test_ds = test_set(dbunch.valid_ds, test_items) if isinstance(dbunch.valid_ds, DataSource) else test_items
-    return dbunch.valid_dl.new(test_ds)
+    test_ds = test_set(dbunch.valid_ds, test_items, rm_tfms=rm_type_tfms) if isinstance(dbunch.valid_ds, DataSource) else test_items
+    return dbunch.valid_dl.new(test_ds, **kwargs)
