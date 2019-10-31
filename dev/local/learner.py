@@ -68,7 +68,10 @@ class GatherPredsCallback(Callback):
         "Save predictions, targets and potentially losses"
         self.preds.append(to_detach(self.pred))
         self.targets.append(to_detach(self.yb))
-        if self.with_loss:  self.losses.append(to_detach(self.loss))
+        if self.with_loss:
+            bs = find_bs(self.yb)
+            loss = self.loss if self.loss.numel() == bs else self.loss.view(bs,-1).mean(1)
+            self.losses.append(to_detach(loss))
 
 #Cell
 _ex_docs = dict(
@@ -121,7 +124,8 @@ def save_model(file, model, opt, with_opt=True):
 def load_model(file, model, opt, with_opt=None, device=None, strict=True):
     "Load `model` from `file` along with `opt` (if available, and if `with_opt`)"
     if isinstance(device, int): device = torch.device('cuda', device)
-    state = torch.load(file)
+    elif device is None: device = 'cpu'
+    state = torch.load(file, map_location=device)
     hasopt = set(state)=={'model', 'opt'}
     model_state = state['model'] if hasopt else state
     get_model(model).load_state_dict(model_state, strict=strict)
@@ -132,8 +136,15 @@ def load_model(file, model, opt, with_opt=None, device=None, strict=True):
     elif with_opt: warn("Saved filed doesn't contain an optimizer state.")
 
 #Cell
+def _try_concat(o):
+    try:
+        return torch.cat(o)
+    except:
+        return sum([L(o_[i,:] for i in range_of(o_)) for o_ in o], L())
+
+#Cell
 class Learner():
-    def __init__(self, dbunch, model, loss_func=None, opt_func=SGD, lr=defaults.lr, splitter=trainable_params, cbs=None,
+    def __init__(self, dbunch, model, loss_func=None, opt_func=Adam, lr=defaults.lr, splitter=trainable_params, cbs=None,
                  cb_funcs=None, metrics=None, path=None, model_dir='models', wd_bn_bias=False, train_bn=True):
         store_attr(self, "dbunch,model,opt_func,lr,splitter,model_dir,wd_bn_bias,train_bn,metrics")
         self.training,self.logger,self.opt,self.cbs = False,print,None,L()
@@ -248,7 +259,7 @@ class Learner():
 
     def validate(self, ds_idx=1, dl=None, cbs=None):
         self.epoch,self.n_epoch,self.loss = 0,1,tensor(0.)
-        self.dl = self.dbunch.dls[ds_idx] if dl is None else dl
+        if dl is None: dl = self.dbunch.dls[ds_idx]
         with self.added_cbs(cbs), self.no_logging():
             self(_before_epoch)
             self._do_epoch_validate(ds_idx, dl)
@@ -266,7 +277,7 @@ class Learner():
             preds = act(torch.cat(cb.preds))
             res = (preds, detuplify(tuple(torch.cat(o) for o in zip(*cb.targets))))
             if with_decoded: res = res + (getattr(self.loss_func, 'decodes', noop)(preds),)
-            if with_input: res = (tuple(torch.cat(o) for o in zip(*cb.inputs)),) + res
+            if with_input: res = (tuple(_try_concat(o) for o in zip(*cb.inputs)),) + res
             if with_loss:  res = res + (torch.cat(cb.losses),)
             return res
 
@@ -279,10 +290,9 @@ class Learner():
         return detuplify(full_dec),dec_preds[0],preds[0]
 
     def show_results(self, ds_idx=0, dl=None, max_n=10, **kwargs):
-        dl = self.dbunch.dls[ds_idx] if dl is None else dl
+        if dl is None: dl = self.dbunch.dls[ds_idx]
         b = dl.one_batch()
-        preds,_ = self.get_preds(dl=[b])
-        preds = getattr(self.loss_func, "decodes", noop)(preds)
+        _,_,preds = self.get_preds(dl=[b], with_decoded=True)
         self.dbunch.show_results(b, preds, max_n=max_n, **kwargs)
 
     def show_training_loop(self):
@@ -308,7 +318,7 @@ class Learner():
         else: return replacing_yield(self, 'loss_func', partial(self.loss_func, reduction='none'))
 
     def save(self, file, with_opt=True):
-        #TODO: if rank_distrib(): return # don't save if slave proc
+        if rank_distrib(): return # don't save if slave proc
         file = join_path_file(file, self.path/self.model_dir, ext='.pth')
         save_model(file, self.model, getattr(self,'opt',None), with_opt)
 
@@ -370,13 +380,21 @@ class Metric():
         value="The value of the metric")
 
 #Cell
+def _maybe_reduce(val):
+    if num_distrib()>1:
+        val = val.clone()
+        torch.distributed.all_reduce(val, op=torch.distributed.ReduceOp.SUM)
+        val /= num_distrib()
+    return val
+
+#Cell
 class AvgMetric(Metric):
     "Average the values of `func` taking into account potential different batch sizes"
     def __init__(self, func):  self.func = func
     def reset(self):           self.total,self.count = 0.,0
     def accumulate(self, learn):
         bs = find_bs(learn.yb)
-        self.total += to_detach(self.func(learn.pred, *learn.yb))*bs
+        self.total += to_detach(_maybe_reduce(self.func(learn.pred, *learn.yb)))*bs
         self.count += bs
     @property
     def value(self): return self.total/self.count if self.count != 0 else None
@@ -389,7 +407,7 @@ class AvgLoss(Metric):
     def reset(self):           self.total,self.count = 0.,0
     def accumulate(self, learn):
         bs = find_bs(learn.yb)
-        self.total += to_detach(learn.loss.mean())*bs
+        self.total += to_detach(_maybe_reduce(learn.loss.mean()))*bs
         self.count += bs
     @property
     def value(self): return self.total/self.count if self.count != 0 else None
@@ -476,7 +494,7 @@ class Recorder(Callback):
     def plot_loss(self, skip_start=5, with_valid=True):
         plt.plot(self.losses[skip_start:], label='train')
         if with_valid:
-            plt.plot(self.iters, L(self.values).itemgot(0), label='valid')
+            plt.plot(self.iters, L(self.values).itemgot(1), label='valid')
             plt.legend()
 
 #Cell
@@ -507,3 +525,20 @@ add_docs(Learner,
          freeze_to="Freeze parameter groups up to `n`",
          freeze="Freeze up to last parameter group",
          unfreeze="Unfreeze the entire model")
+
+#Cell
+@patch
+def export(self:Learner, fname='export.pkl'):
+    "Export the content of `self` without the items and the optimizer state for inference"
+    if rank_distrib(): return # don't export if slave proc
+    old_dbunch = self.dbunch
+    self.dbunch = dbunch.new_empty()
+    state = self.opt.state_dict()
+    self.opt = None
+    with warnings.catch_warnings():
+        #To avoid the warning that come from PyTorch about model not being checked
+        warnings.simplefilter("ignore")
+        torch.save(self, open(self.path/fname, 'wb'))
+    self.create_opt()
+    self.opt.load_state_dict(state)
+    self.dbunch = old_dbunch

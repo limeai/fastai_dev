@@ -17,7 +17,7 @@ def init_cnn(m):
 class XResNet(nn.Sequential):
     def __init__(self, expansion, layers, c_in=3, c_out=1000):
         stem = []
-        sizes = [c_in,32,32,64]
+        sizes = [c_in,16,32,64] if c_in<3 else [c_in,32,32,64]
         for i in range(3):
             stem.append(ConvLayer(sizes[i], sizes[i+1], stride=2 if i==0 else 1))
 
@@ -43,7 +43,7 @@ def _xresnet(pretrained, expansion, layers, **kwargs):
     # TODO pretrain all sizes. Currently will fail with non-xrn50
     url = 'https://s3.amazonaws.com/fast-ai-modelzoo/xrn50_940.pth'
     res = XResNet(expansion, layers, **kwargs)
-    if pretrained: res.load_state_dict(load_state_dict_from_url(url)['model'])
+    if pretrained: res.load_state_dict(load_state_dict_from_url(url, map_location='cpu')['model'])
     return res
 
 def xresnet18 (pretrained=False, **kwargs): return _xresnet(pretrained, 1, [2, 2,  2, 2], **kwargs)
